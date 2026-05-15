@@ -122,7 +122,7 @@ The goal text is wrapped in `<goal_objective>` tags and labeled as user-provided
 
 ## Limitations
 
-This is not a full Claude/Codex-style evaluator-backed `/goal` implementation yet. It is marker-based: the assistant is responsible for ending with `[goal:complete]` or `[goal:blocked]`.
+This is not a full evaluator-backed `/goal` implementation yet. It is marker-based: the assistant is responsible for ending with `[goal:complete]` or `[goal:blocked]`.
 
 That keeps the plugin small and avoids sending hidden evaluator prompts into the same session. A future version could add a separate evaluator model once OpenCode exposes a clean plugin API for that flow.
 

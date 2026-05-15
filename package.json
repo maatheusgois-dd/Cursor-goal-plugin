@@ -10,7 +10,6 @@
   },
   "files": [
     "src",
-    "test",
     "examples",
     "README.md",
     "CHANGELOG.md",

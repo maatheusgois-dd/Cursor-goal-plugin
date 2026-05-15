@@ -1,0 +1,24 @@
+{
+  "name": "opencode-goal-plugin",
+  "version": "0.1.0",
+  "description": "Session-scoped /goal workflow for OpenCode.",
+  "type": "module",
+  "exports": {
+    ".": "./src/goal-plugin.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "agent",
+    "goal"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.14.0"
+  }
+}

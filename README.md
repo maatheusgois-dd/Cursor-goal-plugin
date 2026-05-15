@@ -4,12 +4,6 @@ Experimental session-scoped `/goal` workflow for [OpenCode](https://opencode.ai/
 
 This plugin lets you set a goal, keeps that goal in the session context, and auto-continues when the session becomes idle until the assistant marks the goal complete, reports that it is blocked, or a hard safety limit is reached.
 
-## Important Limitations
-
-OpenCode's current `command.execute.before` hook does not fully intercept command text. The plugin can set, clear, and update in-memory goal state as a side effect, but `/goal ...`, `/goal status`, and `/goal clear` may still be routed into the normal assistant conversation.
-
-That means this package is useful as an experimental workflow plugin, but a polished native `/goal` command requires core OpenCode support for command interception and first-class session-loop control.
-
 ## Install
 
 Install the package in your OpenCode config directory or project:
@@ -77,8 +71,6 @@ Clear the active goal:
 /goal clear
 ```
 
-Because command output is not fully intercepted by OpenCode today, `status` and `clear` should be treated as best-effort plugin side effects rather than native local-only commands.
-
 ## Completion Markers
 
 The plugin stops auto-continuing when the assistant includes one of these markers:
@@ -109,11 +101,13 @@ Supported per-goal flags:
 - `--max-tokens <number>`
 - `--cooldown-ms <number>`
 
-## Current Limitation
+## Limitations
 
 This is not a full Claude/Codex-style evaluator-backed `/goal` implementation yet. It is marker-based: the assistant is responsible for ending with `[goal:complete]` or `[goal:blocked]`.
 
 That keeps the plugin small and avoids sending hidden evaluator prompts into the same session. A future version could add a separate evaluator model once OpenCode exposes a clean plugin API for that flow.
+
+OpenCode's current `command.execute.before` hook does not fully intercept command text. The plugin can set, clear, and update in-memory goal state as a side effect, but command text may still be routed into the normal assistant conversation. A fully native `/goal` command would require core OpenCode support for command interception and first-class session-loop control.
 
 This plugin also depends on OpenCode's current plugin hooks, including `experimental.chat.system.transform`. That API may change.
 

@@ -4,6 +4,12 @@ Experimental session-scoped `/goal` workflow for [OpenCode](https://opencode.ai/
 
 This plugin lets you set a goal, keeps that goal in the session context, and auto-continues when the session becomes idle until the assistant marks the goal complete, reports that it is blocked, or a hard safety limit is reached.
 
+## Important Limitations
+
+OpenCode's current `command.execute.before` hook does not fully intercept command text. The plugin can set, clear, and update in-memory goal state as a side effect, but `/goal ...`, `/goal status`, and `/goal clear` may still be routed into the normal assistant conversation.
+
+That means this package is useful as an experimental workflow plugin, but a polished native `/goal` command requires core OpenCode support for command interception and first-class session-loop control.
+
 ## Install
 
 Install the package in your OpenCode config directory or project:
@@ -71,6 +77,8 @@ Clear the active goal:
 /goal clear
 ```
 
+Because command output is not fully intercepted by OpenCode today, `status` and `clear` should be treated as best-effort plugin side effects rather than native local-only commands.
+
 ## Completion Markers
 
 The plugin stops auto-continuing when the assistant includes one of these markers:
@@ -107,11 +115,11 @@ This is not a full Claude/Codex-style evaluator-backed `/goal` implementation ye
 
 That keeps the plugin small and avoids sending hidden evaluator prompts into the same session. A future version could add a separate evaluator model once OpenCode exposes a clean plugin API for that flow.
 
-This plugin also depends on OpenCode's current plugin hooks, including `experimental.chat.system.transform`. That API may change. The `/goal status` and `/goal clear` commands are implemented through OpenCode's command hook, so OpenCode may still route command output through the normal assistant flow depending on how you invoke commands.
+This plugin also depends on OpenCode's current plugin hooks, including `experimental.chat.system.transform`. That API may change.
 
 ## Local Development
 
-For local testing, add a file URL to your OpenCode config:
+For local testing, add a file URL to the JavaScript plugin file in your OpenCode config:
 
 ```json
 {
@@ -120,6 +128,20 @@ For local testing, add a file URL to your OpenCode config:
 ```
 
 Keep test files outside OpenCode's auto-loaded plugin directory. OpenCode will try to load plugin-like files in that folder during startup.
+
+## Development
+
+Run the test suite:
+
+```sh
+npm test
+```
+
+Run syntax and test checks:
+
+```sh
+npm run check
+```
 
 ## License
 

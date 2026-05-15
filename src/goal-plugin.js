@@ -11,6 +11,7 @@ const DEFAULT_OPTIONS = {
 const goalStates = new Map()
 const seenTokens = new Map()
 const activeContinues = new Set()
+let nextGoalID = 1
 
 function getText(parts) {
   return (parts || [])
@@ -25,7 +26,14 @@ function makeTextPart(text) {
 }
 
 function getSessionID(event) {
-  return event?.properties?.sessionID || event?.properties?.info?.sessionID || event?.sessionID || null
+  return event?.properties?.sessionID || event?.properties?.info?.sessionID || null
+}
+
+function isIdleEvent(event) {
+  return (
+    event?.type === "session.idle" ||
+    (event?.type === "session.status" && event?.properties?.status?.type === "idle")
+  )
 }
 
 function formatStatus(goal) {
@@ -40,11 +48,11 @@ function formatStatus(goal) {
 }
 
 function goalIsComplete(text) {
-  return /(^|\n)\s*\[goal:complete\]\s*$/i.test(text)
+  return /(^|\n)\s*\[goal:complete\]\s*$/i.test(text.trimEnd())
 }
 
 function goalIsBlocked(text) {
-  return /(^|\n)\s*\[goal:blocked\]\s*$/i.test(text)
+  return /(^|\n)\s*\[goal:blocked\]\s*$/i.test(text.trimEnd())
 }
 
 function stopReason(goal) {
@@ -65,6 +73,13 @@ function cleanupGoal(sessionID) {
   }
   goalStates.delete(sessionID)
   activeContinues.delete(sessionID)
+}
+
+function currentGoal(sessionID, goalID) {
+  const goal = goalStates.get(sessionID)
+  if (!goal) return null
+  if (goalID !== undefined && goal.id !== goalID) return null
+  return goal
 }
 
 function toPositiveInteger(value, fallback) {
@@ -191,6 +206,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       }
 
       const goal = {
+        id: nextGoalID++,
         condition: parsed.condition,
         sessionID,
         turnCount: 0,
@@ -203,6 +219,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         messageIDs: new Set(),
       }
 
+      cleanupGoal(sessionID)
       goalStates.set(sessionID, goal)
       output.parts = [
         makeTextPart(
@@ -242,11 +259,12 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         return
       }
 
-      if (event.type !== "session.idle") return
+      if (!isIdleEvent(event)) return
 
       const sessionID = getSessionID(event)
       const goal = goalStates.get(sessionID)
       if (!goal || activeContinues.has(sessionID)) return
+      const goalID = goal.id
 
       activeContinues.add(sessionID)
       try {
@@ -254,12 +272,15 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           path: { id: sessionID },
           query: { limit: 12 },
         })
+        const activeGoalAfterMessages = currentGoal(sessionID, goalID)
+        if (!activeGoalAfterMessages) return
+
         const latestAssistant = [...(messages.data || [])]
           .reverse()
           .find((message) => message.info?.role === "assistant")
         const latestText = getText(latestAssistant?.parts)
 
-        goal.lastAssistantText = latestText
+        activeGoalAfterMessages.lastAssistantText = latestText
 
         if (goalIsComplete(latestText)) {
           cleanupGoal(sessionID)
@@ -267,28 +288,34 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         }
 
         if (goalIsBlocked(latestText)) {
-          goal.lastStatus = "Assistant reported blocked."
+          activeGoalAfterMessages.lastStatus = "Assistant reported blocked."
           cleanupGoal(sessionID)
           return
         }
 
-        const limitReason = stopReason(goal)
+        const limitReason = stopReason(activeGoalAfterMessages)
         if (limitReason) {
-          goal.lastStatus = limitReason
+          activeGoalAfterMessages.lastStatus = limitReason
           cleanupGoal(sessionID)
           return
         }
 
-        const elapsedSinceLastContinue = Date.now() - goal.lastContinueAt
-        if (goal.lastContinueAt && elapsedSinceLastContinue < goal.options.minDelayMs) {
-          await sleep(goal.options.minDelayMs - elapsedSinceLastContinue)
+        const elapsedSinceLastContinue = Date.now() - activeGoalAfterMessages.lastContinueAt
+        if (
+          activeGoalAfterMessages.lastContinueAt &&
+          elapsedSinceLastContinue < activeGoalAfterMessages.options.minDelayMs
+        ) {
+          await sleep(activeGoalAfterMessages.options.minDelayMs - elapsedSinceLastContinue)
         }
 
-        goal.turnCount += 1
-        goal.lastContinueAt = Date.now()
-        goal.lastStatus = latestText
-          ? `Continuing after assistant turn ${goal.turnCount}.`
-          : `Continuing after idle event ${goal.turnCount}.`
+        const activeGoalBeforePrompt = currentGoal(sessionID, goalID)
+        if (!activeGoalBeforePrompt) return
+
+        activeGoalBeforePrompt.turnCount += 1
+        activeGoalBeforePrompt.lastContinueAt = Date.now()
+        activeGoalBeforePrompt.lastStatus = latestText
+          ? `Continuing after assistant turn ${activeGoalBeforePrompt.turnCount}.`
+          : `Continuing after idle event ${activeGoalBeforePrompt.turnCount}.`
 
         const response = await client.session.promptAsync({
           path: { id: sessionID },
@@ -301,19 +328,26 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
                   "Do the next concrete step. Do not ask for confirmation unless you are blocked.",
                   "End with `[goal:complete]` only when the goal is fully satisfied.",
                   "End with `[goal:blocked]` only if user input is required.",
-                  buildLimitWarning(goal),
-                ].join("\n"),
+                  buildLimitWarning(activeGoalBeforePrompt),
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
               ),
             ],
           },
         })
 
         if (response.error) {
-          goal.lastStatus = `Auto-continue failed: ${response.error.name || "unknown error"}`
-          console.error("[goal-plugin]", goal.lastStatus, response.error)
+          const activeGoalAfterPrompt = currentGoal(sessionID, goalID)
+          const message = `Auto-continue failed: ${response.error.name || "unknown error"}`
+          if (activeGoalAfterPrompt) activeGoalAfterPrompt.lastStatus = message
+          console.error("[goal-plugin]", message, response.error)
         }
       } catch (error) {
-        goal.lastStatus = `Auto-continue failed: ${error?.message || error}`
+        const activeGoalAfterError = currentGoal(sessionID, goalID)
+        if (activeGoalAfterError) {
+          activeGoalAfterError.lastStatus = `Auto-continue failed: ${error?.message || error}`
+        }
         console.error("[goal-plugin]", error?.message || error)
       } finally {
         activeContinues.delete(sessionID)
@@ -325,6 +359,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
 
       const goal = goalStates.get(input.sessionID)
       if (!goal) return
+      if (output.system.some((line) => line.startsWith("Active session goal:"))) return
 
       output.system.push(
         [
@@ -339,4 +374,21 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   }
 }
 
-export default GoalPlugin
+export default {
+  id: "opencode-goal-plugin",
+  server: GoalPlugin,
+}
+
+export const testInternals = {
+  buildLimitWarning,
+  cleanupGoal,
+  currentGoal,
+  formatStatus,
+  getSessionID,
+  goalIsBlocked,
+  goalIsComplete,
+  isIdleEvent,
+  normalizeOptions,
+  parseGoalArguments,
+  stopReason,
+}

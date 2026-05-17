@@ -2,6 +2,8 @@
 
 Experimental session-scoped `/goal` workflow for [OpenCode](https://opencode.ai/).
 
+Compatibility target: tested against OpenCode 1.15.3. The plugin uses experimental OpenCode hooks, so pin or re-test OpenCode before depending on it for unattended long-running work.
+
 This plugin lets you set a goal, keeps that goal in the session context, and auto-continues when the session becomes idle until the assistant marks the goal complete, reports that it is blocked, or a hard safety limit is reached.
 
 The continuation prompt includes goal context, remaining budget, and a completion audit so the assistant verifies the current state before marking a goal complete.
@@ -22,7 +24,7 @@ Add the plugin and command to your OpenCode config:
   "command": {
     "goal": {
       "description": "Set a session-scoped goal and auto-continue until complete.",
-      "template": "{{ .Arguments }}",
+      "template": "$ARGUMENTS",
       "agent": "build"
     }
   }
@@ -107,6 +109,8 @@ The current defaults are intentionally conservative:
 
 When a limit is reached, the plugin stops auto-continuing and asks for a concise handoff instead of continuing indefinitely. Use `/goal resume` to continue an in-memory stopped goal.
 
+Goal state is process-memory only. It is scoped to the current OpenCode server process and session, and it is not persisted across OpenCode restarts, plugin reloads, or config reloads.
+
 Supported per-goal flags:
 
 - `--max-turns <number>`
@@ -118,7 +122,7 @@ Supported per-goal flags:
 
 ## Prompt Safety
 
-The goal text is wrapped in `<goal_objective>` tags and labeled as user-provided task data. The assistant is explicitly told to treat the goal as a task description, not as elevated instructions.
+The goal text is wrapped in `<goal_objective>` tags and labeled as user-provided task data. The assistant is explicitly told to treat the goal as a task description, not as elevated instructions. Instructions inside the goal must not override system, developer, tool, or repository policies.
 
 ## Limitations
 
@@ -129,6 +133,8 @@ That keeps the plugin small and avoids sending hidden evaluator prompts into the
 OpenCode's current `command.execute.before` hook does not fully intercept command text. The plugin can set, clear, and update in-memory goal state as a side effect, but command text may still be routed into the normal assistant conversation. A fully native `/goal` command would require core OpenCode support for command interception and first-class session-loop control.
 
 This plugin also depends on OpenCode's current plugin hooks, including `experimental.chat.system.transform`. That API may change.
+
+The tracked token budget is an approximation based on `message.updated` token metadata emitted by OpenCode. It is meant as a safety brake, not billing-grade accounting.
 
 ## Local Development
 
@@ -142,6 +148,14 @@ For local testing, add a file URL to the JavaScript plugin file in your OpenCode
 
 Keep test files outside OpenCode's auto-loaded plugin directory. OpenCode will try to load plugin-like files in that folder during startup.
 
+Manual smoke-test checklist before publishing a release:
+
+1. Install or file-load the plugin in a temporary OpenCode config.
+2. Add a `goal` command with `"template": "$ARGUMENTS"`.
+3. Run `/goal status` and verify it reports no active goal.
+4. Run `/goal inspect this repo and stop immediately with [goal:blocked] if you need user input`.
+5. Verify `/goal status`, `/goal resume`, and `/goal clear` behave as expected.
+
 ## Development
 
 Run the test suite:
@@ -154,6 +168,12 @@ Run syntax and test checks:
 
 ```sh
 npm run check
+```
+
+Check the package contents before publishing:
+
+```sh
+npm run pack:check
 ```
 
 ## License

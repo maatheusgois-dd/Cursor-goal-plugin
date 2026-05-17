@@ -14,6 +14,7 @@ const DEFAULT_OPTIONS = {
 
 const goalStates = new Map()
 const seenTokens = new Map()
+const seenOutputTokens = new Map()
 const activeContinues = new Set()
 
 function getText(parts) {
@@ -81,6 +82,7 @@ function cleanupGoal(sessionID) {
   if (goal) {
     for (const messageID of goal.messageIDs) {
       seenTokens.delete(messageID)
+      seenOutputTokens.delete(messageID)
     }
   }
   goalStates.delete(sessionID)
@@ -383,15 +385,25 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         const goal = goalStates.get(message.sessionID)
         if (!goal) return
 
+        const currentOutputTokens = message.tokens?.output || 0
+        const previousOutputTokens = seenOutputTokens.get(message.id) || 0
         const currentTokens =
           (message.tokens?.input || 0) +
-          (message.tokens?.output || 0) +
+          currentOutputTokens +
           (message.tokens?.reasoning || 0)
         const previousTokens = seenTokens.get(message.id) || 0
         if (currentTokens > previousTokens) {
           goal.totalTokens += currentTokens - previousTokens
           seenTokens.set(message.id, currentTokens)
           goal.messageIDs.add(message.id)
+        }
+
+        if (currentOutputTokens > previousOutputTokens) {
+          seenOutputTokens.set(message.id, currentOutputTokens)
+          goal.messageIDs.add(message.id)
+        }
+
+        if (message.role === "assistant" && currentOutputTokens > previousOutputTokens) {
           goal.lastProgressAt = Date.now()
           goal.noProgressTurns = 0
         }
@@ -561,5 +573,7 @@ export const testInternals = {
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
+  seenOutputTokens,
+  seenTokens,
   stopReason,
 }

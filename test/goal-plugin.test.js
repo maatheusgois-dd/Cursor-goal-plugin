@@ -5,6 +5,7 @@ import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 const {
   buildContinueMessage,
   buildGoalBlock,
+  currentGoal,
   extractBlockedReason,
   goalIsBlocked,
   goalIsComplete,
@@ -280,4 +281,82 @@ test("budget threshold sends wrap-up prompt and stops", async () => {
 
   assert.equal(calls.length, 1)
   assert.match(calls[0].body.parts[0].text, /<budget_wrapup>/)
+})
+
+test("non-assistant token updates count toward budget but do not reset progress", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const goal = currentGoal("session-1")
+  goal.noProgressTurns = 2
+  goal.lastProgressAt = 0
+
+  await hooks.event({
+    event: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-user",
+          role: "user",
+          sessionID: "session-1",
+          tokens: { input: 90, output: 10, reasoning: 0 },
+        },
+      },
+    },
+  })
+
+  assert.equal(goal.totalTokens, 100)
+  assert.equal(goal.noProgressTurns, 2)
+  assert.equal(goal.lastProgressAt, 0)
+})
+
+test("no-progress pause takes precedence over budget wrap-up threshold", async () => {
+  const { calls, hooks } = await createHooks({
+    messages: async () => ({ data: [message("ok", { input: 1, output: 5, reasoning: 0 })] }),
+    options: {
+      minDelayMs: 1,
+      maxTokens: 100,
+      budgetWrapupRatio: 0.8,
+      noProgressTokenThreshold: 50,
+    },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-1", status: { type: "idle" } },
+    },
+  })
+  await hooks.event({
+    event: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-budget-low-output",
+          role: "assistant",
+          sessionID: "session-1",
+          tokens: { input: 80, output: 5, reasoning: 0 },
+        },
+      },
+    },
+  })
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-1", status: { type: "idle" } },
+    },
+  })
+
+  const goal = currentGoal("session-1")
+  assert.equal(calls.length, 1)
+  assert.equal(goal.stopped, true)
+  assert.equal(goal.stopReason, "no progress")
+  assert.equal(goal.budgetWrapupSent, false)
 })

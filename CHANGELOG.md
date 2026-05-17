@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Update OpenCode command examples to use `$ARGUMENTS`.
+- Clarify OpenCode compatibility, in-memory goal lifetime, token-budget limits, and manual smoke testing.
+- Add CI, contribution, and security policy files.
+- Track assistant output progress separately from broad token-budget accounting.
+- Add tests for non-assistant token updates and no-progress/budget-wrap-up ordering.
+
 ## 0.1.3
 
 - Add structured continuation prompts with goal framing, budget context, and completion-audit instructions.

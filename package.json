@@ -13,11 +13,14 @@
     "examples",
     "README.md",
     "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node -c src/goal-plugin.js && npm test"
+    "check": "node -c src/goal-plugin.js && npm test",
+    "pack:check": "npm pack --dry-run"
   },
   "keywords": [
     "opencode",

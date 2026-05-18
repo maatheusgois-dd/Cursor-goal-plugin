@@ -124,7 +124,7 @@ Override any limit for a single goal:
 
 ### Plugin-level defaults
 
-Pass options when registering the plugin to change the defaults for all goals:
+Pass options when registering the plugin to change the defaults for all goals. To combine with the `goal` command, merge this plugin entry into the config shown above.
 
 ```json
 {

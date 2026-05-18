@@ -21,4 +21,4 @@ Relevant security-sensitive areas include:
 - incorrect command or hook handling across OpenCode versions
 - leakage of goal text through logs or status output
 
-The goal text is wrapped in `<goal_objective>` tags and the closing tag is escaped before insertion. Other structural tags used in continuation prompts (`<goal_continuation>`, `<progress_budget>`, etc.) are not escaped. Crafted goal text containing those literal strings would close the tag early in the plaintext prompt; the model treats it as text rather than structure, so the practical risk for a local single-user tool is negligible.
+The goal text is wrapped in `<goal_objective>` tags and the closing tag is escaped before insertion. Other structural tags used in continuation prompts (`<goal_continuation>`, `<progress_budget>`, etc.) are not escaped. Crafted goal text containing those literal strings would close the tag early in the plaintext prompt; the model treats it as text rather than structure, so the practical risk for a local single-user tool is negligible. Do not paste untrusted third-party text into a goal; treat goal text as if you typed it directly into the assistant.

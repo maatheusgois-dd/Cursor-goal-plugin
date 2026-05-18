@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 — 2026-05-18
+
+- Harden `--max-minutes` fallback arithmetic when mixed with millisecond duration overrides.
+- Clarify plugin-default config merging and goal-text trust guidance.
+
 ## 0.1.7 — 2026-05-18
 
 - Accept bare final-line `goal:complete` and `goal:blocked` markers in addition to canonical bracketed markers, matching observed model output during smoke testing.

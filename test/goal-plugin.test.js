@@ -416,6 +416,15 @@ test("parses --max-duration-ms flag directly", () => {
   assert.equal(parsed.options.maxDurationMs, 90000)
 })
 
+test("--max-minutes fallback stays integer after millisecond duration override", () => {
+  const parsed = parseGoalArguments(
+    "fix tests --max-duration-ms 90000 --max-minutes dangling",
+    normalizeOptions(),
+  )
+  assert.equal(parsed.condition, "fix tests")
+  assert.equal(parsed.options.maxDurationMs, 120000)
+})
+
 test("dangling flag at end does not pollute goal condition", () => {
   const defaults = normalizeOptions()
   const parsed = parseGoalArguments("fix tests --max-turns", defaults)

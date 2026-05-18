@@ -219,7 +219,11 @@ function parseGoalArguments(args, defaults) {
       continue
     }
     if (part === "--max-minutes") {
-      if (nextIsValue) { options.maxDurationMs = toPositiveInteger(next, options.maxDurationMs / 60000) * 60000; i += 1 }
+      if (nextIsValue) {
+        options.maxDurationMs =
+          toPositiveInteger(next, Math.ceil(options.maxDurationMs / 60000)) * 60000
+        i += 1
+      }
       continue
     }
     if (part === "--max-tokens") {

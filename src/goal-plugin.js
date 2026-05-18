@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 
 const DEFAULT_OPTIONS = {
   maxTurns: 10,
-  maxDurationMs: 5 * 60 * 1000,
+  maxDurationMs: 15 * 60 * 1000,
   maxTokens: 200000,
   minDelayMs: 1500,
   noProgressTokenThreshold: 50,

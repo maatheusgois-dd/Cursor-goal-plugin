@@ -80,11 +80,11 @@ function formatGoalResult(result) {
 }
 
 function goalIsComplete(text) {
-  return /(^|\n)\s*\[goal:complete\]\s*$/i.test(text.trimEnd())
+  return /(^|\n)\s*(?:\[goal:complete\]|goal:complete)\s*$/i.test(text.trimEnd())
 }
 
 function goalIsBlocked(text) {
-  return /(^|\n)\s*\[goal:blocked\]\s*$/i.test(text.trimEnd())
+  return /(^|\n)\s*(?:\[goal:blocked\]|goal:blocked)\s*$/i.test(text.trimEnd())
 }
 
 function stopReason(goal) {
@@ -337,7 +337,10 @@ function buildContinueMessage(goal, { budgetWrapup = false } = {}) {
 
 function extractBlockedReason(text) {
   const lines = text.trimEnd().split("\n")
-  const markerIndex = lines.findIndex((line) => line.trim().toLowerCase() === "[goal:blocked]")
+  const markerIndex = lines.findIndex((line) => {
+    const trimmed = line.trim().toLowerCase()
+    return trimmed === "[goal:blocked]" || trimmed === "goal:blocked"
+  })
   if (markerIndex <= 0) return ""
   return lines
     .slice(0, markerIndex)

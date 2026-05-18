@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7 — 2026-05-18
+
+- Accept bare final-line `goal:complete` and `goal:blocked` markers in addition to canonical bracketed markers, matching observed model output during smoke testing.
+
 ## 0.1.6 — 2026-05-18
 
 - Add `/goal pause` plus clear aliases (`stop`, `off`, `reset`, `none`, `cancel`).

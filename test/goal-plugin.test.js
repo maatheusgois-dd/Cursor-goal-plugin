@@ -64,9 +64,11 @@ test("exports v1 OpenCode plugin module shape", () => {
 test("completion markers must be final-line markers", () => {
   assert.equal(goalIsComplete("Done\n\n[goal:complete]"), true)
   assert.equal(goalIsComplete("Done\n\n[goal:complete]   "), true)
+  assert.equal(goalIsComplete("Done\n\ngoal:complete"), true)
   assert.equal(goalIsComplete("Is the goal complete?"), false)
   assert.equal(goalIsComplete("[goal:complete] (5 turns)"), false)
   assert.equal(goalIsBlocked("Need input\n[goal:blocked]"), true)
+  assert.equal(goalIsBlocked("Need input\ngoal:blocked"), true)
   assert.equal(goalIsBlocked("Don't consider this goal blocked."), false)
 })
 
@@ -107,6 +109,10 @@ test("continue message includes budget context and completion audit", () => {
 test("blocked reason is extracted from line before marker", () => {
   assert.equal(
     extractBlockedReason("I need the API key before continuing.\n[goal:blocked]"),
+    "I need the API key before continuing.",
+  )
+  assert.equal(
+    extractBlockedReason("I need the API key before continuing.\ngoal:blocked"),
     "I need the API key before continuing.",
   )
 })

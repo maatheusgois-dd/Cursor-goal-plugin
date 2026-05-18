@@ -85,7 +85,7 @@ The plugin stops when it sees one of these at the end of an assistant response:
 `[goal:complete]` — goal is satisfied.
 `[goal:blocked]` — the assistant needs input from you. The line immediately before the marker explains the specific blocker; `/goal status` shows it while the goal remains in memory.
 
-Markers must appear on their own final line. Natural-language phrases like "goal complete" are intentionally ignored.
+Markers must appear on their own final line. The bracketed form is canonical, but the plugin also accepts bare `goal:complete` and `goal:blocked` final lines because some models omit brackets. Natural-language phrases like "goal complete" are intentionally ignored.
 
 ## Safety limits
 

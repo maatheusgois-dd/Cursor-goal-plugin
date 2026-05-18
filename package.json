@@ -1,6 +1,6 @@
 {
   "name": "opencode-goal-plugin",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "description": "Session-scoped /goal workflow for OpenCode.",
   "type": "module",
   "main": "./src/goal-plugin.js",
@@ -13,11 +13,14 @@
     "examples",
     "README.md",
     "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node -c src/goal-plugin.js && npm test"
+    "check": "node -c src/goal-plugin.js && npm test",
+    "pack:check": "npm pack --dry-run"
   },
   "keywords": [
     "opencode",
@@ -27,6 +30,7 @@
   ],
   "license": "MIT",
   "engines": {
+    "node": ">=18",
     "opencode": ">=1.14.0"
   },
   "repository": {
@@ -38,6 +42,7 @@
   },
   "homepage": "https://github.com/willytop8/OpenCode-goal-plugin#readme",
   "author": {
-    "name": "William"
+    "name": "William",
+    "email": "will.ricchiuti@gmail.com"
   }
 }

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.5 — 2026-05-18
+
+- Change default `maxDurationMs` from 5 minutes to 15 minutes so the turn limit is the binding safety brake at typical LLM latency (30–90 s/turn).
+- Rewrite README: clearer structure, limits table with effective-turn-count and token-budget notes, per-goal flags table, updated default values in config examples.
+
+## 0.1.4 — 2026-05-18
+
+- Fix `parseGoalArguments` to reject flags-as-values and dangling flags (e.g. `/goal fix tests --max-turns --max-tokens 50000` no longer corrupts the condition or silently swallows flags).
+- Fix `/goal resume` to no-op when the goal is already running instead of resetting `lastContinueAt`.
+- Fix `experimental.chat.system.transform` to strip the trailing newline from the system block when no limit warnings apply, matching `buildContinueMessage` behavior.
+- Remove live `seenTokens`/`seenOutputTokens` Map references from `testInternals`.
+- Update OpenCode command examples to use `$ARGUMENTS`.
+- Clarify OpenCode compatibility, in-memory goal lifetime, token-budget limits, and manual smoke testing.
+- Add CI, contribution, and security policy files.
+- Track assistant output progress separately from broad token-budget accounting.
+- Expand test coverage: `--max-duration-ms` flag, dangling/adjacent flags, `promptAsync` error path, thrown-error recovery, `[goal:complete]` state cleanup, already-sent wrapup silent stop, multi-session isolation, `formatStatus` shape, and command no-active-goal paths.
+
 ## 0.1.3
 
 - Add structured continuation prompts with goal framing, budget context, and completion-audit instructions.

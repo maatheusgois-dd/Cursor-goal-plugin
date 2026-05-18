@@ -4,7 +4,7 @@
   "command": {
     "goal": {
       "description": "Set a session-scoped goal and auto-continue until complete.",
-      "template": "{{ .Arguments }}",
+      "template": "$ARGUMENTS",
       "agent": "build"
     }
   }

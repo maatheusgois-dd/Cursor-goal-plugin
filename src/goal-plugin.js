@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 
 const DEFAULT_OPTIONS = {
   maxTurns: 10,
-  maxDurationMs: 5 * 60 * 1000,
+  maxDurationMs: 15 * 60 * 1000,
   maxTokens: 200000,
   minDelayMs: 1500,
   noProgressTokenThreshold: 50,
@@ -14,6 +14,7 @@ const DEFAULT_OPTIONS = {
 
 const goalStates = new Map()
 const seenTokens = new Map()
+const seenOutputTokens = new Map()
 const activeContinues = new Set()
 
 function getText(parts) {
@@ -81,6 +82,7 @@ function cleanupGoal(sessionID) {
   if (goal) {
     for (const messageID of goal.messageIDs) {
       seenTokens.delete(messageID)
+      seenOutputTokens.delete(messageID)
     }
   }
   goalStates.delete(sessionID)
@@ -136,35 +138,30 @@ function parseGoalArguments(args, defaults) {
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i]
     const next = parts[i + 1]
+    const nextIsValue = next !== undefined && !next.startsWith("--")
 
-    if (part === "--max-turns" && next) {
-      options.maxTurns = toPositiveInteger(next, options.maxTurns)
-      i += 1
+    if (part === "--max-turns") {
+      if (nextIsValue) { options.maxTurns = toPositiveInteger(next, options.maxTurns); i += 1 }
       continue
     }
-    if (part === "--max-duration-ms" && next) {
-      options.maxDurationMs = toPositiveInteger(next, options.maxDurationMs)
-      i += 1
+    if (part === "--max-duration-ms") {
+      if (nextIsValue) { options.maxDurationMs = toPositiveInteger(next, options.maxDurationMs); i += 1 }
       continue
     }
-    if (part === "--max-minutes" && next) {
-      options.maxDurationMs = toPositiveInteger(next, options.maxDurationMs / 60000) * 60000
-      i += 1
+    if (part === "--max-minutes") {
+      if (nextIsValue) { options.maxDurationMs = toPositiveInteger(next, options.maxDurationMs / 60000) * 60000; i += 1 }
       continue
     }
-    if (part === "--max-tokens" && next) {
-      options.maxTokens = toPositiveInteger(next, options.maxTokens)
-      i += 1
+    if (part === "--max-tokens") {
+      if (nextIsValue) { options.maxTokens = toPositiveInteger(next, options.maxTokens); i += 1 }
       continue
     }
-    if (part === "--cooldown-ms" && next) {
-      options.minDelayMs = toPositiveInteger(next, options.minDelayMs)
-      i += 1
+    if (part === "--cooldown-ms") {
+      if (nextIsValue) { options.minDelayMs = toPositiveInteger(next, options.minDelayMs); i += 1 }
       continue
     }
-    if (part === "--no-progress-threshold" && next) {
-      options.noProgressTokenThreshold = toPositiveInteger(next, options.noProgressTokenThreshold)
-      i += 1
+    if (part === "--no-progress-threshold") {
+      if (nextIsValue) { options.noProgressTokenThreshold = toPositiveInteger(next, options.noProgressTokenThreshold); i += 1 }
       continue
     }
 
@@ -319,6 +316,10 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           output.parts = [makeTextPart("No active goal. Set one with `/goal <condition>`.")]
           return
         }
+        if (!goal.stopped) {
+          output.parts = [makeTextPart("Goal is already running.")]
+          return
+        }
 
         goal.stopped = false
         goal.stopReason = ""
@@ -383,15 +384,25 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         const goal = goalStates.get(message.sessionID)
         if (!goal) return
 
+        const currentOutputTokens = message.tokens?.output || 0
+        const previousOutputTokens = seenOutputTokens.get(message.id) || 0
         const currentTokens =
           (message.tokens?.input || 0) +
-          (message.tokens?.output || 0) +
+          currentOutputTokens +
           (message.tokens?.reasoning || 0)
         const previousTokens = seenTokens.get(message.id) || 0
         if (currentTokens > previousTokens) {
           goal.totalTokens += currentTokens - previousTokens
           seenTokens.set(message.id, currentTokens)
           goal.messageIDs.add(message.id)
+        }
+
+        if (currentOutputTokens > previousOutputTokens) {
+          seenOutputTokens.set(message.id, currentOutputTokens)
+          goal.messageIDs.add(message.id)
+        }
+
+        if (message.role === "assistant" && currentOutputTokens > previousOutputTokens) {
           goal.lastProgressAt = Date.now()
           goal.noProgressTurns = 0
         }
@@ -524,7 +535,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       const goal = goalStates.get(input.sessionID)
       if (!goal) return
       if (goal.stopped) return
-      if (output.system.some((line) => line.includes("<goal_objective>"))) return
+      if (output.system.some((block) => block.includes("<goal_objective>"))) return
 
       output.system.push(
         [
@@ -533,7 +544,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           "When fully satisfied, end the response with `[goal:complete]`.",
           "If user input is required, explain the blocker in the line immediately before `[goal:blocked]`.",
           buildLimitWarning(goal),
-        ].join("\n"),
+        ].filter(Boolean).join("\n"),
       )
     },
   }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add a no-model command-hook smoke test for the package entrypoint and `/goal` command behavior.
+- Run the smoke test in CI and document it for contributors.
+- Correct security reporting instructions while GitHub private vulnerability reporting is disabled.
+
 ## 0.1.8 — 2026-05-18
 
 - Harden `--max-minutes` fallback arithmetic when mixed with millisecond duration overrides.

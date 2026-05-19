@@ -6,9 +6,12 @@ This project is experimental. Security fixes are provided for the latest publish
 
 ## Reporting a Vulnerability
 
-Please report security issues through GitHub's private vulnerability reporting for this repository.
+Private vulnerability reporting is not currently enabled for this repository. If it is enabled later, please use it for sensitive reports.
 
-Do not open a public issue for vulnerabilities that could expose user data, credentials, or local system access.
+Until then, do not open a public issue with exploit details, credentials, local paths,
+or reproduction steps that could expose user data, credentials, or local system access.
+Open a minimal public issue asking for a private contact path, or contact the maintainer
+through their GitHub profile.
 
 ## Scope
 

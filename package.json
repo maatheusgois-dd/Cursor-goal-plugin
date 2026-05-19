@@ -10,6 +10,7 @@
   },
   "files": [
     "src",
+    "scripts",
     "examples",
     "README.md",
     "CHANGELOG.md",
@@ -19,6 +20,7 @@
   ],
   "scripts": {
     "test": "node --test",
+    "smoke": "node scripts/smoke-command-hook.mjs",
     "check": "node -c src/goal-plugin.js && npm test",
     "pack:check": "npm pack --dry-run"
   },

@@ -181,6 +181,7 @@ Keep test files outside OpenCode's auto-loaded plugin directory — OpenCode wil
 
 ```sh
 npm test          # run the test suite
+npm run smoke     # verify package export + command hook without a model call
 npm run check     # syntax check + tests
 npm run pack:check  # verify package contents before publishing
 ```

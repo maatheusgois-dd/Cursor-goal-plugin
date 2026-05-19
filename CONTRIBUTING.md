@@ -8,6 +8,7 @@ Run the local checks before submitting changes:
 
 ```sh
 npm run check
+npm run smoke
 npm run pack:check
 ```
 
@@ -21,6 +22,10 @@ This plugin depends on OpenCode plugin hooks, including experimental hooks. When
 2. Test against a real OpenCode install when possible.
 3. Update the README compatibility note if the tested version changes.
 
+`npm run smoke` verifies the published package entrypoint and `/goal` command hook without
+invoking a model. It does not replace a manual OpenCode smoke test after hook or command
+behavior changes.
+
 ## Pull Requests
 
 Keep pull requests focused. Include:
@@ -29,4 +34,3 @@ Keep pull requests focused. Include:
 - why it changed
 - the checks you ran
 - any manual OpenCode smoke testing performed
-

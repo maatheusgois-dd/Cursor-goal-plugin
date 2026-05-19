@@ -23,5 +23,8 @@ jobs:
       - name: Run checks
         run: npm run check
 
+      - name: Run smoke test
+        run: npm run smoke
+
       - name: Verify package contents
         run: npm run pack:check

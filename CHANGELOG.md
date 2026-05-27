@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix `experimental.chat.system.transform` to merge the goal continuation block into the primary system entry instead of pushing a separate one. Prevents `"System message must be at the beginning."` errors on strict-template backends (Qwen on vLLM, several Llama.cpp/Mistral templates). See issue #1.
+
 ## 0.1.8 — 2026-05-18
 
 - Harden `--max-minutes` fallback arithmetic when mixed with millisecond duration overrides.

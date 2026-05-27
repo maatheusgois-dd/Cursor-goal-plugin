@@ -5,12 +5,15 @@ const DEFAULT_OPTIONS = {
   maxDurationMs: 15 * 60 * 1000,
   maxTokens: 200000,
   minDelayMs: 1500,
+  maxRecentMessages: 50,
   noProgressTokenThreshold: 50,
   budgetWrapupRatio: 0.8,
   warnTurnsRemaining: 3,
   warnDurationMsRemaining: 60 * 1000,
   warnTokensRemaining: 25000,
   maxPromptFailures: 3,
+  resultRetentionMs: 7 * 24 * 60 * 60 * 1000,
+  maxStoredResults: 200,
 }
 
 const goalStates = new Map()
@@ -20,6 +23,34 @@ const seenOutputTokens = new Map()
 const activeContinues = new Set()
 const CLEAR_COMMANDS = new Set(["clear", "stop", "off", "reset", "none", "cancel"])
 const PAUSE_COMMANDS = new Set(["pause"])
+const GOAL_FLAG_SPECS = {
+  "--max-turns": {
+    optionKey: "maxTurns",
+    parse: (value, options) => toPositiveInteger(value, options.maxTurns),
+  },
+  "--max-duration-ms": {
+    optionKey: "maxDurationMs",
+    parse: (value, options) => toPositiveInteger(value, options.maxDurationMs),
+  },
+  "--max-minutes": {
+    optionKey: "maxDurationMs",
+    parse: (value, options) =>
+      toPositiveInteger(value, Math.ceil(options.maxDurationMs / 60000)) * 60000,
+  },
+  "--max-tokens": {
+    optionKey: "maxTokens",
+    parse: (value, options) => toPositiveInteger(value, options.maxTokens),
+  },
+  "--cooldown-ms": {
+    optionKey: "minDelayMs",
+    parse: (value, options) => toPositiveInteger(value, options.minDelayMs),
+  },
+  "--no-progress-threshold": {
+    optionKey: "noProgressTokenThreshold",
+    parse: (value, options) =>
+      toPositiveInteger(value, options.noProgressTokenThreshold),
+  },
+}
 
 function getText(parts) {
   return (parts || [])
@@ -108,7 +139,26 @@ function cleanupGoal(sessionID) {
   activeContinues.delete(sessionID)
 }
 
+function pruneGoalResults(options) {
+  const retentionMs = options?.resultRetentionMs ?? DEFAULT_OPTIONS.resultRetentionMs
+  const maxStoredResults = options?.maxStoredResults ?? DEFAULT_OPTIONS.maxStoredResults
+  const now = Date.now()
+
+  for (const [sessionID, result] of lastGoalResults.entries()) {
+    if (!result?.finishedAt || now - result.finishedAt > retentionMs) {
+      lastGoalResults.delete(sessionID)
+    }
+  }
+
+  while (lastGoalResults.size > maxStoredResults) {
+    const oldestSessionID = lastGoalResults.keys().next().value
+    if (oldestSessionID === undefined) break
+    lastGoalResults.delete(oldestSessionID)
+  }
+}
+
 function rememberGoalResult(sessionID, goal, state, reason = "") {
+  lastGoalResults.delete(sessionID)
   lastGoalResults.set(sessionID, {
     condition: goal.condition,
     state,
@@ -120,6 +170,7 @@ function rememberGoalResult(sessionID, goal, state, reason = "") {
     finishedAt: Date.now(),
     lastStatus: goal.lastStatus,
   })
+  pruneGoalResults(goal.options)
 }
 
 function resetGoalBudget(goal) {
@@ -151,12 +202,25 @@ function toPositiveInteger(value, fallback) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function parsePositiveIntegerStrict(value) {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function stripWrappingQuotes(value) {
+  return value.replace(/^["']|["']$/g, "")
+}
+
 function normalizeOptions(options = {}) {
   return {
     maxTurns: toPositiveInteger(options.maxTurns, DEFAULT_OPTIONS.maxTurns),
     maxDurationMs: toPositiveInteger(options.maxDurationMs, DEFAULT_OPTIONS.maxDurationMs),
     maxTokens: toPositiveInteger(options.maxTokens, DEFAULT_OPTIONS.maxTokens),
     minDelayMs: toPositiveInteger(options.minDelayMs, DEFAULT_OPTIONS.minDelayMs),
+    maxRecentMessages: toPositiveInteger(
+      options.maxRecentMessages,
+      DEFAULT_OPTIONS.maxRecentMessages,
+    ),
     noProgressTokenThreshold: toPositiveInteger(
       options.noProgressTokenThreshold,
       DEFAULT_OPTIONS.noProgressTokenThreshold,
@@ -181,6 +245,14 @@ function normalizeOptions(options = {}) {
       options.maxPromptFailures,
       DEFAULT_OPTIONS.maxPromptFailures,
     ),
+    resultRetentionMs: toPositiveInteger(
+      options.resultRetentionMs,
+      DEFAULT_OPTIONS.resultRetentionMs,
+    ),
+    maxStoredResults: toPositiveInteger(
+      options.maxStoredResults,
+      DEFAULT_OPTIONS.maxStoredResults,
+    ),
   }
 }
 
@@ -204,47 +276,48 @@ function parseGoalArguments(args, defaults) {
   const parts = args.match(/"[^"]*"|'[^']*'|\S+/g) || []
   const condition = []
   const options = { ...defaults }
+  const errors = []
 
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i]
-    const next = parts[i + 1]
-    const nextIsValue = next !== undefined && !next.startsWith("--")
 
-    if (part === "--max-turns") {
-      if (nextIsValue) { options.maxTurns = toPositiveInteger(next, options.maxTurns); i += 1 }
-      continue
-    }
-    if (part === "--max-duration-ms") {
-      if (nextIsValue) { options.maxDurationMs = toPositiveInteger(next, options.maxDurationMs); i += 1 }
-      continue
-    }
-    if (part === "--max-minutes") {
-      if (nextIsValue) {
-        options.maxDurationMs =
-          toPositiveInteger(next, Math.ceil(options.maxDurationMs / 60000)) * 60000
-        i += 1
+    if (part.startsWith("--")) {
+      const [flagName, inlineValue] = part.split(/=(.*)/s, 2)
+      const flagSpec = GOAL_FLAG_SPECS[flagName]
+
+      if (!flagSpec) {
+        const next = parts[i + 1]
+        if (inlineValue === undefined && next !== undefined && !next.startsWith("--")) i += 1
+        errors.push(`Unsupported flag: ${flagName}`)
+        continue
       }
-      continue
-    }
-    if (part === "--max-tokens") {
-      if (nextIsValue) { options.maxTokens = toPositiveInteger(next, options.maxTokens); i += 1 }
-      continue
-    }
-    if (part === "--cooldown-ms") {
-      if (nextIsValue) { options.minDelayMs = toPositiveInteger(next, options.minDelayMs); i += 1 }
-      continue
-    }
-    if (part === "--no-progress-threshold") {
-      if (nextIsValue) { options.noProgressTokenThreshold = toPositiveInteger(next, options.noProgressTokenThreshold); i += 1 }
+
+      const next = parts[i + 1]
+      const value = inlineValue ?? (next !== undefined && !next.startsWith("--") ? next : undefined)
+      if (inlineValue === undefined && value !== undefined) i += 1
+
+      if (value === undefined) {
+        errors.push(`Missing value for ${flagName}`)
+        continue
+      }
+
+      const parsedValue = parsePositiveIntegerStrict(stripWrappingQuotes(value))
+      if (parsedValue === null) {
+        errors.push(`Invalid positive integer for ${flagName}: ${value}`)
+        continue
+      }
+
+      options[flagSpec.optionKey] = flagSpec.parse(parsedValue, options)
       continue
     }
 
-    condition.push(part.replace(/^["']|["']$/g, ""))
+    condition.push(stripWrappingQuotes(part))
   }
 
   return {
     condition: condition.join(" ").trim(),
     options,
+    errors,
   }
 }
 
@@ -352,6 +425,20 @@ function extractBlockedReason(text) {
     .find((line) => line.trim())?.trim() || ""
 }
 
+function formatArgumentErrors(errors) {
+  return [
+    "Goal flags could not be parsed.",
+    ...errors.map((error) => `- ${error}`),
+    "",
+    "Supported flags: --max-turns, --max-minutes, --max-duration-ms, --max-tokens, --cooldown-ms, --no-progress-threshold.",
+    "You can pass them as `--flag value` or `--flag=value`.",
+  ].join("\n")
+}
+
+function findLatestAssistantMessage(messages) {
+  return [...(messages || [])].reverse().find((message) => message.info?.role === "assistant") || null
+}
+
 function outputTokensForMessage(message) {
   return message?.info?.tokens?.output || 0
 }
@@ -372,6 +459,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
 
       const args = (input.arguments || "").trim()
       const sessionID = input.sessionID
+      pruneGoalResults(defaultGoalOptions)
 
       if (!args || args === "status") {
         const goal = goalStates.get(sessionID)
@@ -429,6 +517,10 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       }
 
       const parsed = parseGoalArguments(args, defaultGoalOptions)
+      if (parsed.errors.length > 0) {
+        output.parts = [makeTextPart(formatArgumentErrors(parsed.errors))]
+        return
+      }
       if (!parsed.condition) {
         output.parts = [makeTextPart("No goal provided. Set one with `/goal <condition>`.")]
         return
@@ -519,16 +611,14 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       try {
         const messages = await client.session.messages({
           path: { id: sessionID },
-          query: { limit: 12 },
+          query: { limit: goal.options.maxRecentMessages },
         })
         const activeGoalAfterMessages = currentGoal(sessionID, goalID)
         if (!activeGoalAfterMessages) return
 
-        const latestAssistant = [...(messages.data || [])]
-          .reverse()
-          .find((message) => message.info?.role === "assistant")
+        const latestAssistant = findLatestAssistantMessage(messages.data)
         const latestText = getText(latestAssistant?.parts)
-        const latestOutputTokens = outputTokensForMessage(latestAssistant)
+        const latestOutputTokens = latestAssistant ? outputTokensForMessage(latestAssistant) : null
 
         activeGoalAfterMessages.lastAssistantText = latestText
 
@@ -568,6 +658,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
 
         if (
           activeGoalAfterMessages.turnCount > 0 &&
+          latestOutputTokens !== null &&
           latestOutputTokens < activeGoalAfterMessages.options.noProgressTokenThreshold
         ) {
           activeGoalAfterMessages.noProgressTurns += 1
@@ -683,6 +774,8 @@ export const testInternals = {
   currentGoal,
   escapeGoalText,
   extractBlockedReason,
+  findLatestAssistantMessage,
+  formatArgumentErrors,
   formatStatus,
   getSessionID,
   goalIsBlocked,
@@ -691,5 +784,7 @@ export const testInternals = {
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
+  parsePositiveIntegerStrict,
+  pruneGoalResults,
   stopReason,
 }

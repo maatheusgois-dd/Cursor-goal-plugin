@@ -41,6 +41,8 @@ Override limits for a single goal:
 /goal fix the failing tests --max-turns 20 --max-minutes 30 --max-tokens 400000
 ```
 
+Flags accept either `--flag value` or `--flag=value`. If a flag is unknown, missing a value, or given a non-positive integer, the plugin rejects the command with a helpful error instead of silently folding the bad flag into the goal text.
+
 Check status:
 
 ```
@@ -122,6 +124,13 @@ Override any limit for a single goal:
 | `--cooldown-ms <n>` | Minimum delay between continues |
 | `--no-progress-threshold <n>` | Output token floor before pausing |
 
+Examples:
+
+```sh
+/goal fix tests --max-turns 20 --max-tokens 400000
+/goal fix tests --max-turns=20 --max-tokens=400000
+```
+
 ### Plugin-level defaults
 
 Pass options when registering the plugin to change the defaults for all goals. To combine with the `goal` command, merge this plugin entry into the config shown above.
@@ -136,14 +145,23 @@ Pass options when registering the plugin to change the defaults for all goals. T
         "maxDurationMs": 900000,
         "maxTokens": 200000,
         "minDelayMs": 1500,
+        "maxRecentMessages": 50,
         "noProgressTokenThreshold": 50,
         "budgetWrapupRatio": 0.8,
-        "maxPromptFailures": 3
+        "maxPromptFailures": 3,
+        "resultRetentionMs": 604800000,
+        "maxStoredResults": 200
       }
     ]
   ]
 }
 ```
+
+Additional plugin-level options:
+
+- `maxRecentMessages` — how many recent session messages to scan when looking for the latest assistant turn before auto-continuing. Higher values make long, tool-heavy sessions less likely to lose the most recent assistant response.
+- `resultRetentionMs` — how long a completed goal summary remains available through `/goal status` after the goal leaves active memory.
+- `maxStoredResults` — maximum number of completed-goal summaries retained in process memory before the oldest ones are evicted.
 
 ## Prompt safety
 
@@ -180,8 +198,9 @@ Keep test files outside OpenCode's auto-loaded plugin directory — OpenCode wil
 ## Development
 
 ```sh
-npm test          # run the test suite
-npm run check     # syntax check + tests
+npm test            # run the test suite
+npm run test:coverage  # run tests with coverage
+npm run check       # syntax check + tests
 npm run pack:check  # verify package contents before publishing
 ```
 

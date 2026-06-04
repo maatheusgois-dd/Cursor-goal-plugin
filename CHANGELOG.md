@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.11 — 2026-06-04
+
 - Add `npm run smoke`, a package-export smoke test that exercises the `/goal` command hook without invoking a model.
 - Run CI across Node 18, 20, and 22, and wire the package-entry smoke test into the workflow.
 - Harden persisted-state loading with schema validation and explicit skipping of malformed goal/result entries.

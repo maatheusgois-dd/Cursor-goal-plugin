@@ -9,14 +9,19 @@ const {
   buildContinueMessage,
   buildGoalBlock,
   buildLimitWarning,
+  budgetWrapupNeeded,
   currentGoal,
+  escapeGoalText,
   extractBlockedReason,
   formatStatus,
+  getSessionID,
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
   normalizeOptions,
+  outputTokensForMessage,
   parseGoalArguments,
+  stopReason,
 } = testInternals
 
 function textPart(text) {
@@ -1564,4 +1569,92 @@ test("persist failures are logged without throwing", async () => {
   )
 
   assert.ok(logs.some((entry) => entry.body.message === "Failed to persist goal state"))
+})
+
+// ── Helper unit tests ──────────────────────────────────────────────────────
+
+test("escapeGoalText escapes all XML closing tags, not just goal_objective", () => {
+  assert.equal(
+    escapeGoalText("inject </goal_objective> here"),
+    "inject <\\/goal_objective> here",
+  )
+  assert.equal(
+    escapeGoalText("break </goal_continuation> frame"),
+    "break <\\/goal_continuation> frame",
+  )
+  assert.equal(
+    escapeGoalText("also </next_step> and </completion_audit>"),
+    "also <\\/next_step> and <\\/completion_audit>",
+  )
+  assert.equal(escapeGoalText("safe text"), "safe text")
+})
+
+test("outputTokensForMessage extracts output token count", () => {
+  assert.equal(outputTokensForMessage({ info: { tokens: { output: 42 } } }), 42)
+  assert.equal(outputTokensForMessage({ info: { tokens: {} } }), 0)
+  assert.equal(outputTokensForMessage(null), 0)
+  assert.equal(outputTokensForMessage(undefined), 0)
+})
+
+test("budgetWrapupNeeded returns true only when threshold is reached and not already sent", () => {
+  const goal = {
+    budgetWrapupSent: false,
+    totalTokens: 85000,
+    options: { maxTokens: 100000, budgetWrapupRatio: 0.8 },
+  }
+  assert.equal(budgetWrapupNeeded(goal), true)
+  goal.totalTokens = 79999
+  assert.equal(budgetWrapupNeeded(goal), false)
+  goal.totalTokens = 85000
+  goal.budgetWrapupSent = true
+  assert.equal(budgetWrapupNeeded(goal), false)
+})
+
+test("getSessionID reads from both event property shapes", () => {
+  assert.equal(getSessionID({ properties: { sessionID: "abc" } }), "abc")
+  assert.equal(getSessionID({ properties: { info: { sessionID: "def" } } }), "def")
+  assert.equal(getSessionID({}), null)
+  assert.equal(getSessionID(null), null)
+})
+
+test("stopReason returns correct string for each limit type", () => {
+  const base = {
+    startedAt: Date.now(),
+    totalTokens: 0,
+    options: normalizeOptions({ maxTurns: 5, maxDurationMs: 60000, maxTokens: 1000 }),
+  }
+  assert.match(stopReason({ ...base, turnCount: 5 }), /max turns/)
+  assert.match(stopReason({ ...base, turnCount: 4, startedAt: Date.now() - 70000 }), /max duration/)
+  assert.match(stopReason({ ...base, turnCount: 4, totalTokens: 1000 }), /max tokens/)
+  assert.equal(stopReason({ ...base, turnCount: 4 }), null)
+})
+
+test("normalizeOptions falls back to defaults for zero, negative, and non-numeric values", () => {
+  const defaults = normalizeOptions()
+  const result = normalizeOptions({
+    maxTurns: 0,
+    maxDurationMs: -5,
+    maxTokens: "banana",
+    minDelayMs: NaN,
+    noProgressTokenThreshold: null,
+    maxPromptFailures: undefined,
+    noProgressTurnsBeforePause: 0,
+    maxRecentMessages: -1,
+  })
+  assert.equal(result.maxTurns, defaults.maxTurns)
+  assert.equal(result.maxDurationMs, defaults.maxDurationMs)
+  assert.equal(result.maxTokens, defaults.maxTokens)
+  assert.equal(result.minDelayMs, defaults.minDelayMs)
+  assert.equal(result.noProgressTokenThreshold, defaults.noProgressTokenThreshold)
+  assert.equal(result.maxPromptFailures, defaults.maxPromptFailures)
+  assert.equal(result.noProgressTurnsBeforePause, defaults.noProgressTurnsBeforePause)
+  assert.equal(result.maxRecentMessages, defaults.maxRecentMessages)
+})
+
+test("normalizeOptions rejects budgetWrapupRatio at boundary values 0 and 1", () => {
+  const defaults = normalizeOptions()
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 0 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 1 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: "high" }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 0.5 }).budgetWrapupRatio, 0.5)
 })

@@ -686,7 +686,9 @@ function buildLimitWarning(goal) {
 }
 
 function escapeGoalText(text) {
-  return String(text).replaceAll("</goal_objective>", "<\\/goal_objective>")
+  // Escape every XML closing tag so user-supplied goal text cannot break the
+  // structural framing used in buildGoalBlock and buildContinueMessage.
+  return String(text).replaceAll("</", "<\\/")
 }
 
 function buildGoalBlock(goal) {

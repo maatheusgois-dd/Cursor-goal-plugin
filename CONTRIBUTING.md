@@ -17,6 +17,7 @@ npm test
 npm run test:coverage
 npm run smoke
 npm run check
+npm run smoke
 npm run pack:check
 ```
 
@@ -45,6 +46,10 @@ Before publishing or tagging a release:
 - run `npm run pack:check`
 - perform at least one manual OpenCode smoke test if hook behavior changed
 - refresh compatibility notes if the tested OpenCode surface changed
+
+`npm run smoke` verifies the published package entrypoint and `/goal` command hook without
+invoking a model. It does not replace a manual OpenCode smoke test after hook or command
+behavior changes.
 
 ## Pull Requests
 

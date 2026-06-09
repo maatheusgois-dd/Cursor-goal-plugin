@@ -95,7 +95,7 @@ Markers must appear on their own final line. The bracketed form is canonical, bu
 | Max duration | 15 minutes |
 | Tracked tokens | 200,000 |
 | Min delay between continues | 1.5 seconds |
-| No-progress pause | < 50 output tokens on a turn |
+| No-progress pause | < 50 output tokens for 2 consecutive turns |
 | Budget wrap-up threshold | 80% of tracked token budget |
 | Auto-continue failure pause | 3 consecutive prompt failures |
 
@@ -137,8 +137,13 @@ Pass options when registering the plugin to change the defaults for all goals. T
         "maxTokens": 200000,
         "minDelayMs": 1500,
         "noProgressTokenThreshold": 50,
+        "noProgressTurnsBeforePause": 2,
         "budgetWrapupRatio": 0.8,
-        "maxPromptFailures": 3
+        "warnTurnsRemaining": 3,
+        "warnDurationMsRemaining": 60000,
+        "warnTokensRemaining": 25000,
+        "maxPromptFailures": 3,
+        "maxRecentMessages": 12
       }
     ]
   ]

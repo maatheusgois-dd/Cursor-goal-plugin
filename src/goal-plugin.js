@@ -6,11 +6,13 @@ const DEFAULT_OPTIONS = {
   maxTokens: 200000,
   minDelayMs: 1500,
   noProgressTokenThreshold: 50,
+  noProgressTurnsBeforePause: 2,
   budgetWrapupRatio: 0.8,
   warnTurnsRemaining: 3,
   warnDurationMsRemaining: 60 * 1000,
   warnTokensRemaining: 25000,
   maxPromptFailures: 3,
+  maxRecentMessages: 12,
 }
 
 const goalStates = new Map()
@@ -181,6 +183,14 @@ function normalizeOptions(options = {}) {
       options.maxPromptFailures,
       DEFAULT_OPTIONS.maxPromptFailures,
     ),
+    noProgressTurnsBeforePause: toPositiveInteger(
+      options.noProgressTurnsBeforePause,
+      DEFAULT_OPTIONS.noProgressTurnsBeforePause,
+    ),
+    maxRecentMessages: toPositiveInteger(
+      options.maxRecentMessages,
+      DEFAULT_OPTIONS.maxRecentMessages,
+    ),
   }
 }
 
@@ -272,7 +282,9 @@ function buildLimitWarning(goal) {
 }
 
 function escapeGoalText(text) {
-  return String(text).replaceAll("</goal_objective>", "<\\/goal_objective>")
+  // Escape every XML closing tag so user-supplied goal text cannot break the
+  // structural framing used in buildGoalBlock and buildContinueMessage.
+  return String(text).replaceAll("</", "<\\/")
 }
 
 function buildGoalBlock(goal) {
@@ -361,6 +373,20 @@ function budgetWrapupNeeded(goal) {
     !goal.budgetWrapupSent &&
     goal.totalTokens >= Math.floor(goal.options.maxTokens * goal.options.budgetWrapupRatio)
   )
+}
+
+async function applyPromptFailure(sessionID, goalID, message, error, client) {
+  const goal = currentGoal(sessionID, goalID)
+  if (goal) {
+    goal.promptFailures += 1
+    goal.lastStatus = message
+    if (goal.promptFailures >= goal.options.maxPromptFailures) {
+      goal.stopped = true
+      goal.stopReason = "auto-continue failures"
+      goal.lastStatus = `${message}; paused after ${goal.promptFailures} failure(s). Run /goal resume to retry.`
+    }
+  }
+  await logPluginError(client, message, error)
 }
 
 export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
@@ -503,7 +529,6 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
 
         if (message.role === "assistant" && currentOutputTokens > previousOutputTokens) {
           goal.lastProgressAt = Date.now()
-          goal.noProgressTurns = 0
         }
         return
       }
@@ -519,7 +544,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       try {
         const messages = await client.session.messages({
           path: { id: sessionID },
-          query: { limit: 12 },
+          query: { limit: goal.options.maxRecentMessages },
         })
         const activeGoalAfterMessages = currentGoal(sessionID, goalID)
         if (!activeGoalAfterMessages) return
@@ -566,15 +591,18 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           return
         }
 
-        if (
-          activeGoalAfterMessages.turnCount > 0 &&
-          latestOutputTokens < activeGoalAfterMessages.options.noProgressTokenThreshold
-        ) {
-          activeGoalAfterMessages.noProgressTurns += 1
-          activeGoalAfterMessages.stopped = true
-          activeGoalAfterMessages.stopReason = "no progress"
-          activeGoalAfterMessages.lastStatus = `Goal auto-continue paused: last turn produced ${latestOutputTokens} output token(s). Run /goal resume to continue.`
-          return
+        if (activeGoalAfterMessages.turnCount > 0) {
+          if (latestOutputTokens < activeGoalAfterMessages.options.noProgressTokenThreshold) {
+            activeGoalAfterMessages.noProgressTurns += 1
+            if (activeGoalAfterMessages.noProgressTurns >= activeGoalAfterMessages.options.noProgressTurnsBeforePause) {
+              activeGoalAfterMessages.stopped = true
+              activeGoalAfterMessages.stopReason = "no progress"
+              activeGoalAfterMessages.lastStatus = `Goal paused: ${activeGoalAfterMessages.noProgressTurns} consecutive turn(s) below ${activeGoalAfterMessages.options.noProgressTokenThreshold} output tokens. Run /goal resume to continue.`
+              return
+            }
+          } else {
+            activeGoalAfterMessages.noProgressTurns = 0
+          }
         }
 
         const elapsedSinceLastContinue = Date.now() - activeGoalAfterMessages.lastContinueAt
@@ -614,35 +642,25 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         })
 
         if (response.error) {
-          const activeGoalAfterPrompt = currentGoal(sessionID, goalID)
-          const message = `Auto-continue failed: ${response.error.name || "unknown error"}`
-          if (activeGoalAfterPrompt) {
-            activeGoalAfterPrompt.promptFailures += 1
-            activeGoalAfterPrompt.lastStatus = message
-            if (activeGoalAfterPrompt.promptFailures >= activeGoalAfterPrompt.options.maxPromptFailures) {
-              activeGoalAfterPrompt.stopped = true
-              activeGoalAfterPrompt.stopReason = "auto-continue failures"
-              activeGoalAfterPrompt.lastStatus = `${message}; paused after ${activeGoalAfterPrompt.promptFailures} failure(s). Run /goal resume to retry.`
-            }
-          }
-          await logPluginError(client, message, response.error)
+          await applyPromptFailure(
+            sessionID,
+            goalID,
+            `Auto-continue failed: ${response.error.name || "unknown error"}`,
+            response.error,
+            client,
+          )
         } else {
           const activeGoalAfterPrompt = currentGoal(sessionID, goalID)
           if (activeGoalAfterPrompt) activeGoalAfterPrompt.promptFailures = 0
         }
       } catch (error) {
-        const activeGoalAfterError = currentGoal(sessionID, goalID)
-        if (activeGoalAfterError) {
-          activeGoalAfterError.promptFailures += 1
-          const message = `Auto-continue failed: ${error?.message || error}`
-          activeGoalAfterError.lastStatus = message
-          if (activeGoalAfterError.promptFailures >= activeGoalAfterError.options.maxPromptFailures) {
-            activeGoalAfterError.stopped = true
-            activeGoalAfterError.stopReason = "auto-continue failures"
-            activeGoalAfterError.lastStatus = `${message}; paused after ${activeGoalAfterError.promptFailures} failure(s). Run /goal resume to retry.`
-          }
-        }
-        await logPluginError(client, "Auto-continue failed", error)
+        await applyPromptFailure(
+          sessionID,
+          goalID,
+          `Auto-continue failed: ${error?.message || error}`,
+          error,
+          client,
+        )
       } finally {
         activeContinues.delete(sessionID)
       }
@@ -675,6 +693,7 @@ export default {
 }
 
 export const testInternals = {
+  applyPromptFailure,
   buildLimitWarning,
   buildContinueMessage,
   buildGoalBlock,
@@ -688,6 +707,7 @@ export const testInternals = {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  logPluginError,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,

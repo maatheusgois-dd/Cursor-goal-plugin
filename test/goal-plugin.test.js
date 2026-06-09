@@ -3,16 +3,24 @@ import test from "node:test"
 import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 
 const {
+  applyPromptFailure,
   buildContinueMessage,
   buildGoalBlock,
+  buildLimitWarning,
+  budgetWrapupNeeded,
   currentGoal,
+  escapeGoalText,
   extractBlockedReason,
   formatStatus,
+  getSessionID,
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  logPluginError,
   normalizeOptions,
+  outputTokensForMessage,
   parseGoalArguments,
+  stopReason,
 } = testInternals
 
 function textPart(text) {
@@ -115,6 +123,16 @@ test("blocked reason is extracted from line before marker", () => {
     extractBlockedReason("I need the API key before continuing.\ngoal:blocked"),
     "I need the API key before continuing.",
   )
+  assert.equal(
+    extractBlockedReason("[goal:blocked]"),
+    "",
+    "marker on first line returns empty string",
+  )
+  assert.equal(
+    extractBlockedReason("goal:blocked"),
+    "",
+    "bare marker on first line returns empty string",
+  )
 })
 
 test("recognizes session.status idle events alongside deprecated session.idle", () => {
@@ -201,7 +219,7 @@ test("clear during an in-flight idle handler prevents promptAsync", async () => 
 test("near-zero output pauses instead of auto-continuing", async () => {
   const { calls, hooks } = await createHooks({
     messages: async () => ({ data: [message("ok", { input: 1, output: 5, reasoning: 0 })] }),
-    options: { minDelayMs: 1, noProgressTokenThreshold: 50 },
+    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 1 },
   })
   await hooks["command.execute.before"](
     { command: "goal", sessionID: "session-1", arguments: "ship it" },
@@ -226,7 +244,7 @@ test("near-zero output pauses instead of auto-continuing", async () => {
 test("stopped goals can be resumed", async () => {
   const { hooks } = await createHooks({
     messages: async () => ({ data: [message("ok", { input: 1, output: 5, reasoning: 0 })] }),
-    options: { minDelayMs: 1, noProgressTokenThreshold: 50 },
+    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 1 },
   })
   await hooks["command.execute.before"](
     { command: "goal", sessionID: "session-1", arguments: "ship it" },
@@ -440,6 +458,36 @@ test("adjacent flags do not corrupt each other", () => {
   assert.equal(parsed.options.maxTokens, 50000)
 })
 
+test("normalizeOptions falls back to defaults for zero, negative, and non-numeric values", () => {
+  const defaults = normalizeOptions()
+  const result = normalizeOptions({
+    maxTurns: 0,
+    maxDurationMs: -5,
+    maxTokens: "banana",
+    minDelayMs: NaN,
+    noProgressTokenThreshold: null,
+    maxPromptFailures: undefined,
+    noProgressTurnsBeforePause: 0,
+    maxRecentMessages: -1,
+  })
+  assert.equal(result.maxTurns, defaults.maxTurns)
+  assert.equal(result.maxDurationMs, defaults.maxDurationMs)
+  assert.equal(result.maxTokens, defaults.maxTokens)
+  assert.equal(result.minDelayMs, defaults.minDelayMs)
+  assert.equal(result.noProgressTokenThreshold, defaults.noProgressTokenThreshold)
+  assert.equal(result.maxPromptFailures, defaults.maxPromptFailures)
+  assert.equal(result.noProgressTurnsBeforePause, defaults.noProgressTurnsBeforePause)
+  assert.equal(result.maxRecentMessages, defaults.maxRecentMessages)
+})
+
+test("normalizeOptions rejects budgetWrapupRatio at boundary values 0 and 1", () => {
+  const defaults = normalizeOptions()
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 0 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 1 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: "high" }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 0.5 }).budgetWrapupRatio, 0.5)
+})
+
 test("no-progress pause takes precedence over budget wrap-up threshold", async () => {
   const { calls, hooks } = await createHooks({
     messages: async () => ({ data: [message("ok", { input: 1, output: 5, reasoning: 0 })] }),
@@ -448,6 +496,7 @@ test("no-progress pause takes precedence over budget wrap-up threshold", async (
       maxTokens: 100,
       budgetWrapupRatio: 0.8,
       noProgressTokenThreshold: 50,
+      noProgressTurnsBeforePause: 1,
     },
   })
   await hooks["command.execute.before"](
@@ -735,4 +784,195 @@ test("two sessions run independent goals without interference", async () => {
   assert.equal(calls[1].path.id, "session-B")
   assert.equal(currentGoal("session-A").condition, "task A")
   assert.equal(currentGoal("session-B").condition, "task B")
+})
+
+// ── Helper unit tests ──────────────────────────────────────────────────────
+
+test("buildLimitWarning returns empty string when limits are far away", () => {
+  const goal = {
+    startedAt: Date.now(),
+    turnCount: 1,
+    totalTokens: 1000,
+    options: normalizeOptions({ maxTurns: 20, maxDurationMs: 30 * 60 * 1000, maxTokens: 200000 }),
+  }
+  assert.equal(buildLimitWarning(goal), "")
+})
+
+test("buildLimitWarning warns when turns are near the limit", () => {
+  const goal = {
+    startedAt: Date.now() - 100,
+    turnCount: 18,
+    totalTokens: 1000,
+    options: normalizeOptions({ maxTurns: 20, warnTurnsRemaining: 3 }),
+  }
+  assert.match(buildLimitWarning(goal), /2 auto-continue turn\(s\) remaining/)
+})
+
+test("buildLimitWarning warns when tokens are near the limit", () => {
+  const goal = {
+    startedAt: Date.now() - 100,
+    turnCount: 1,
+    totalTokens: 180000,
+    options: normalizeOptions({ maxTokens: 200000, warnTokensRemaining: 25000 }),
+  }
+  assert.match(buildLimitWarning(goal), /20,000 tracked token\(s\) remaining/)
+})
+
+test("outputTokensForMessage extracts output token count", () => {
+  assert.equal(outputTokensForMessage({ info: { tokens: { output: 42 } } }), 42)
+  assert.equal(outputTokensForMessage({ info: { tokens: {} } }), 0)
+  assert.equal(outputTokensForMessage(null), 0)
+  assert.equal(outputTokensForMessage(undefined), 0)
+})
+
+test("budgetWrapupNeeded returns true only when threshold is reached and not already sent", () => {
+  const goal = {
+    budgetWrapupSent: false,
+    totalTokens: 85000,
+    options: { maxTokens: 100000, budgetWrapupRatio: 0.8 },
+  }
+  assert.equal(budgetWrapupNeeded(goal), true)
+  goal.totalTokens = 79999
+  assert.equal(budgetWrapupNeeded(goal), false)
+  goal.totalTokens = 85000
+  goal.budgetWrapupSent = true
+  assert.equal(budgetWrapupNeeded(goal), false)
+})
+
+test("getSessionID reads from both event property shapes", () => {
+  assert.equal(getSessionID({ properties: { sessionID: "abc" } }), "abc")
+  assert.equal(getSessionID({ properties: { info: { sessionID: "def" } } }), "def")
+  assert.equal(getSessionID({}), null)
+  assert.equal(getSessionID(null), null)
+})
+
+test("escapeGoalText escapes all XML closing tags", () => {
+  assert.equal(
+    escapeGoalText("inject </goal_objective> here"),
+    "inject <\\/goal_objective> here",
+  )
+  assert.equal(
+    escapeGoalText("break </goal_continuation> frame"),
+    "break <\\/goal_continuation> frame",
+  )
+  assert.equal(
+    escapeGoalText("also </next_step> and </completion_audit>"),
+    "also <\\/next_step> and <\\/completion_audit>",
+  )
+  assert.equal(escapeGoalText("safe text"), "safe text")
+})
+
+test("stopReason returns correct string for each limit type", () => {
+  const base = {
+    startedAt: Date.now(),
+    totalTokens: 0,
+    options: normalizeOptions({ maxTurns: 5, maxDurationMs: 60000, maxTokens: 1000 }),
+  }
+  assert.match(stopReason({ ...base, turnCount: 5 }), /max turns/)
+  assert.match(stopReason({ ...base, turnCount: 4, startedAt: Date.now() - 70000 }), /max duration/)
+  assert.match(stopReason({ ...base, turnCount: 4, totalTokens: 1000 }), /max tokens/)
+  assert.equal(stopReason({ ...base, turnCount: 4 }), null)
+})
+
+test("logPluginError falls back to console.error when client lacks app.log", async () => {
+  const captured = []
+  const orig = console.error
+  console.error = (...args) => captured.push(args)
+  try {
+    await logPluginError(null, "disk full", new Error("ENOSPC"))
+    await logPluginError({}, "no log method", new Error("missing"))
+  } finally {
+    console.error = orig
+  }
+  assert.equal(captured.length, 2)
+  assert.ok(captured[0].some((a) => String(a).includes("disk full")))
+})
+
+test("applyPromptFailure increments failures and stops after maxPromptFailures", async () => {
+  const { hooks } = await createHooks({ options: { maxPromptFailures: 2, minDelayMs: 1 } })
+  const sessionID = "session-apf-1"
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID, arguments: "ship it" },
+    { parts: [] },
+  )
+  const goalID = currentGoal(sessionID).goalId
+  const logs = []
+  const client = { app: { log: async (e) => logs.push(e) } }
+
+  await applyPromptFailure(sessionID, goalID, "Auto-continue failed: timeout", new Error("timeout"), client)
+  assert.equal(currentGoal(sessionID).promptFailures, 1)
+  assert.equal(currentGoal(sessionID).stopped, false)
+
+  await applyPromptFailure(sessionID, goalID, "Auto-continue failed: timeout", new Error("timeout"), client)
+  assert.equal(currentGoal(sessionID).promptFailures, 2)
+  assert.equal(currentGoal(sessionID).stopped, true)
+  assert.equal(currentGoal(sessionID).stopReason, "auto-continue failures")
+  assert.equal(logs.length, 2)
+})
+
+test("no-progress grace window allows N-1 stalls before pausing", async () => {
+  const idle = (sessionID) => ({
+    event: {
+      type: "session.status",
+      properties: { sessionID, status: { type: "idle" } },
+    },
+  })
+  const { calls, hooks } = await createHooks({
+    messages: async () => ({ data: [message("ok", { input: 1, output: 5, reasoning: 0 })] }),
+    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 3 },
+  })
+  const sessionID = "session-grace-1"
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID, arguments: "ship it" },
+    { parts: [] },
+  )
+
+  await hooks.event(idle(sessionID))  // turn 0: no check → sends continue
+  assert.equal(calls.length, 1)
+
+  await hooks.event(idle(sessionID))  // noProgressTurns=1 < 3 → sends continue
+  assert.equal(calls.length, 2)
+  assert.equal(currentGoal(sessionID).stopped, false)
+
+  await hooks.event(idle(sessionID))  // noProgressTurns=2 < 3 → sends continue
+  assert.equal(calls.length, 3)
+  assert.equal(currentGoal(sessionID).stopped, false)
+
+  await hooks.event(idle(sessionID))  // noProgressTurns=3 >= 3 → stops
+  assert.equal(calls.length, 3)
+  const goal = currentGoal(sessionID)
+  assert.equal(goal.stopped, true)
+  assert.equal(goal.stopReason, "no progress")
+  assert.equal(goal.noProgressTurns, 3)
+})
+
+test("no-progress counter resets when a high-output turn is seen", async () => {
+  const idle = (sessionID) => ({
+    event: {
+      type: "session.status",
+      properties: { sessionID, status: { type: "idle" } },
+    },
+  })
+  let lowOutput = true
+  const { calls, hooks } = await createHooks({
+    messages: async () => ({
+      data: [message("ok", lowOutput ? { input: 1, output: 5, reasoning: 0 } : { input: 1, output: 200, reasoning: 0 })],
+    }),
+    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 2 },
+  })
+  const sessionID = "session-grace-2"
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID, arguments: "ship it" },
+    { parts: [] },
+  )
+
+  await hooks.event(idle(sessionID))  // turn 0: no check → sends continue
+  await hooks.event(idle(sessionID))  // noProgressTurns=1 < 2 → sends continue (grace)
+  assert.equal(currentGoal(sessionID).noProgressTurns, 1)
+
+  lowOutput = false
+  await hooks.event(idle(sessionID))  // high output → noProgressTurns resets to 0
+  assert.equal(currentGoal(sessionID).noProgressTurns, 0)
+  assert.equal(currentGoal(sessionID).stopped, false)
+  assert.equal(calls.length, 3)
 })

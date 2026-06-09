@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.12 — 2026-06-08
+
+- Harden `escapeGoalText` to escape all XML closing tags (`</` → `<\/`) instead of only `</goal_objective>`, closing a prompt-injection path where user-supplied goal text could break structural framing in the continuation message.
+- Add unit tests for `outputTokensForMessage`, `budgetWrapupNeeded`, `getSessionID`, `stopReason`, `normalizeOptions` boundary inputs (zero, negative, NaN, null, `budgetWrapupRatio` at 0 and 1), and `escapeGoalText` covering all structural tags.
+
 ## 0.1.11 — 2026-06-04
 
 - Add `npm run smoke`, a package-export smoke test that exercises the `/goal` command hook without invoking a model.

@@ -2,9 +2,26 @@
 
 ## Unreleased
 
-- Add a no-model command-hook smoke test for the package entrypoint and `/goal` command behavior.
-- Run the smoke test in CI and document it for contributors.
-- Correct security reporting instructions while GitHub private vulnerability reporting is disabled.
+## 0.1.11 — 2026-06-04
+
+- Add `npm run smoke`, a package-export smoke test that exercises the `/goal` command hook without invoking a model.
+- Run CI across Node 18, 20, and 22, and wire the package-entry smoke test into the workflow.
+- Harden persisted-state loading with schema validation and explicit skipping of malformed goal/result entries.
+- Make hook handling more defensive around message payload shapes and `system` block normalization.
+- Expand docs around compatibility, release checks, smoke testing, and security reporting fallback.
+
+## 0.1.10 — 2026-05-30
+
+- Fix `experimental.chat.system.transform` to merge the goal continuation block into the primary system entry instead of pushing a separate one. Prevents `"System message must be at the beginning."` errors on strict-template backends (Qwen on vLLM, several Llama.cpp/Mistral templates). See issue #1.
+
+## 0.1.9 — 2026-05-18
+
+> This release makes the goal plugin much more reliable for real unattended use. Goals now persist across restarts, recover in a safe paused state, expose better status/history visibility, and use smarter no-progress detection to avoid premature stalls. It also hardens persistence with atomic writes, stricter file permissions, and regression tests around corrupt or missing state.
+
+- Persist active goals and recent results to `~/.opencode-goal-plugin/state.json` by default, with recovered goals loaded in a paused state.
+- Add `/goal history` plus richer `/goal status` output with recent checkpoint and suggested-next-action hints.
+- Replace one-shot low-output pausing with a configurable consecutive-stall grace window via `noProgressTurnsBeforePause` / `--no-progress-turns`.
+- Expand tests to cover history output, persistence recovery, repeated-stall pausing, and changing short assistant updates.
 
 ## 0.1.8 — 2026-05-18
 

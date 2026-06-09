@@ -4,7 +4,16 @@ An experimental session-scoped `/goal` command for [OpenCode](https://opencode.a
 
 Set a goal and the plugin keeps it in context, auto-continues the session whenever the assistant goes idle, and stops when the goal is marked complete, a blocker is reported, or a safety limit is reached.
 
-Compatibility: tested against OpenCode 1.15.4. The plugin relies on experimental OpenCode hooks; pin or re-test against your OpenCode version before using it for unattended long-running work.
+Compatibility: this plugin relies on experimental OpenCode hooks. Re-test against the exact OpenCode build and provider/backend stack you plan to use for unattended work.
+
+## Compatibility snapshot
+
+| Surface | Status |
+|---|---|
+| Node.js | Declared support: `>=18`; CI covers Node 18, 20, and 22 |
+| Package entrypoint | `npm run smoke` verifies the package export path plus `/goal` command-hook behavior from a local install without invoking a model |
+| OpenCode host | Manually smoke-tested against OpenCode 1.15.10 using the `opencode-go` provider (`qwen3.7-plus`) on this repo's local hardening branch; re-test your own version/provider stack before relying on unattended runs |
+| Provider/backend quirks | Strict-template backends require the goal block to merge into the primary `system` message; covered by regression tests |
 
 ## Install
 
@@ -41,10 +50,18 @@ Override limits for a single goal:
 /goal fix the failing tests --max-turns 20 --max-minutes 30 --max-tokens 400000
 ```
 
+Flags accept either `--flag value` or `--flag=value`. If a flag is unknown, missing a value, or given a non-positive integer, the plugin rejects the command with a helpful error instead of silently folding the bad flag into the goal text.
+
 Check status:
 
 ```
 /goal status
+```
+
+View lifecycle history and the latest checkpoint:
+
+```
+/goal history
 ```
 
 Resume a paused or stopped goal:
@@ -95,7 +112,7 @@ Markers must appear on their own final line. The bracketed form is canonical, bu
 | Max duration | 15 minutes |
 | Tracked tokens | 200,000 |
 | Min delay between continues | 1.5 seconds |
-| No-progress pause | < 50 output tokens for 2 consecutive turns |
+| No-progress pause | < 50 output tokens on a stalled turn (after a 2-turn grace window) |
 | Budget wrap-up threshold | 80% of tracked token budget |
 | Auto-continue failure pause | 3 consecutive prompt failures |
 
@@ -103,11 +120,17 @@ Markers must appear on their own final line. The bracketed form is canonical, bu
 
 **Token budget.** The plugin tracks `input + output + reasoning` tokens across all session messages. In high-context sessions (large codebases, long conversation history), input overhead per turn can be substantial and the budget may be exhausted before the turn limit is reached. Treat it as a safety brake, not precise billing accounting.
 
+**No-progress heuristic.** A low-output turn does not pause immediately anymore. The plugin pauses only after `noProgressTurnsBeforePause` consecutive *stalled* low-output turns — repeated turns with very little output and no meaningful change in the latest assistant checkpoint.
+
 **Wrap-up vs. hard stop.** When a limit is reached, the plugin sends one final prompt asking the assistant to summarize what is done, what remains, and the next concrete step — rather than stopping silently. Use `/goal resume` to continue after any stop, including limit stops and no-progress pauses.
 
-Goal state is process-memory only. It is not persisted across OpenCode restarts, plugin reloads, or config reloads.
+Goal state is persisted by default to `~/.opencode-goal-plugin/state.json`, but only as a local workflow checkpoint. It is not synchronized across machines or OpenCode instances.
 
-`/goal resume` continues the same in-memory objective with a fresh local budget window. This lets you continue after pause, blocker, no-progress pause, rate-limit failures, or a limit stop without retyping the objective.
+The state directory is created with owner-only permissions, and the JSON state file is written as `0600` because it may contain goal text, assistant checkpoints, and workflow history.
+
+Recovered active goals are loaded in a **paused** state with a recovery note, so unattended auto-continue does not resume blindly after a restart. Set `"persistState": false` to keep purely in-memory behavior.
+
+`/goal resume` continues the same objective with a fresh local budget window. This lets you continue after pause, blocker, no-progress pause, rate-limit failures, or a limit stop without retyping the objective.
 
 ### Per-goal flags
 
@@ -121,6 +144,15 @@ Override any limit for a single goal:
 | `--max-tokens <n>` | Tracked token limit |
 | `--cooldown-ms <n>` | Minimum delay between continues |
 | `--no-progress-threshold <n>` | Output token floor before pausing |
+| `--no-progress-turns <n>` | Consecutive stalled low-output turns before pausing |
+
+Examples:
+
+```sh
+/goal fix tests --max-turns 20 --max-tokens 400000
+/goal fix tests --max-turns=20 --max-tokens=400000
+/goal fix tests --no-progress-threshold 50 --no-progress-turns 2
+```
 
 ### Plugin-level defaults
 
@@ -136,19 +168,29 @@ Pass options when registering the plugin to change the defaults for all goals. T
         "maxDurationMs": 900000,
         "maxTokens": 200000,
         "minDelayMs": 1500,
+        "maxRecentMessages": 50,
         "noProgressTokenThreshold": 50,
         "noProgressTurnsBeforePause": 2,
         "budgetWrapupRatio": 0.8,
-        "warnTurnsRemaining": 3,
-        "warnDurationMsRemaining": 60000,
-        "warnTokensRemaining": 25000,
         "maxPromptFailures": 3,
-        "maxRecentMessages": 12
+        "persistState": true,
+        "stateFilePath": "/home/you/.opencode-goal-plugin/state.json",
+        "resultRetentionMs": 604800000,
+        "maxStoredResults": 200
       }
     ]
   ]
 }
 ```
+
+Additional plugin-level options:
+
+- `maxRecentMessages` — how many recent session messages to scan when looking for the latest assistant turn before auto-continuing. Higher values make long, tool-heavy sessions less likely to lose the most recent assistant response.
+- `noProgressTurnsBeforePause` — grace window for low-output stalls. The plugin pauses only after this many consecutive stalled low-output turns rather than on the first one.
+- `persistState` — whether to persist active goals and recent goal results to disk.
+- `stateFilePath` — where the persisted state JSON is written. Useful if you want per-project or ephemeral storage.
+- `resultRetentionMs` — how long a completed goal summary remains available through `/goal status` after the goal leaves active memory.
+- `maxStoredResults` — maximum number of completed-goal summaries retained in process memory before the oldest ones are evicted.
 
 ## Prompt safety
 
@@ -176,19 +218,22 @@ Keep test files outside OpenCode's auto-loaded plugin directory — OpenCode wil
 
 ### Smoke-test checklist
 
-1. Install or file-load the plugin in a temporary OpenCode config.
-2. Add a `goal` command with `"template": "$ARGUMENTS"`.
-3. Run `/goal status` — should report no active goal.
-4. Run `/goal inspect this repo and stop immediately with [goal:blocked] if you need user input`.
-5. Verify `/goal status`, `/goal pause`, `/goal resume`, and `/goal clear` behave as expected.
+1. Run `npm run smoke` to verify the package export path and `/goal` command hook without a model call.
+2. Install or file-load the plugin in a temporary OpenCode config.
+3. Add a `goal` command with `"template": "$ARGUMENTS"`.
+4. Run `/goal status` — should report no active goal.
+5. Run `/goal inspect this repo and stop immediately with [goal:blocked] if you need user input`.
+6. Verify `/goal status`, `/goal pause`, `/goal resume`, and `/goal clear` behave as expected.
+7. If you changed hook payload handling or command behavior, repeat the smoke test against the exact OpenCode version and provider/backend combination you care about.
 
 ## Development
 
 ```sh
-npm test          # run the test suite
-npm run smoke     # verify package export + command hook without a model call
-npm run check     # syntax check + tests
-npm run pack:check  # verify package contents before publishing
+npm test                # run the test suite
+npm run test:coverage   # run tests with coverage
+npm run smoke           # verify package export + command hook without a model call
+npm run check           # syntax check + tests
+npm run pack:check      # verify package contents before publishing
 ```
 
 ## License

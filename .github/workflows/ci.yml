@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,13 +13,14 @@ jobs:
   check:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node-version: ["18", "20", "22"]
+        node-version: [18, 20, 22]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js ${{ matrix.node-version }}
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -26,7 +28,7 @@ jobs:
       - name: Run checks
         run: npm run check
 
-      - name: Run smoke test
+      - name: Run package smoke test
         run: npm run smoke
 
       - name: Verify package contents

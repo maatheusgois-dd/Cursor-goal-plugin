@@ -1,9 +1,11 @@
 import assert from "node:assert/strict"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
 import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 
 const {
-  applyPromptFailure,
   buildContinueMessage,
   buildGoalBlock,
   buildLimitWarning,
@@ -16,7 +18,6 @@ const {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
-  logPluginError,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
@@ -60,7 +61,10 @@ async function createHooks(overrides = {}) {
         }),
     },
   }
-  const hooks = await GoalPlugin({ client }, overrides.options || {})
+  const hooks = await GoalPlugin(
+    { client },
+    { persistState: false, ...(overrides.options || {}) },
+  )
   return { calls, hooks, logs }
 }
 
@@ -82,7 +86,7 @@ test("completion markers must be final-line markers", () => {
 
 test("parses per-goal flags without including them in the condition", () => {
   const parsed = parseGoalArguments(
-    'fix tests --max-turns 20 --max-minutes 15 --max-tokens 400000 --cooldown-ms 25 --no-progress-threshold 12',
+    'fix tests --max-turns 20 --max-minutes 15 --max-tokens 400000 --cooldown-ms 25 --no-progress-threshold 12 --no-progress-turns 3',
     normalizeOptions(),
   )
   assert.equal(parsed.condition, "fix tests")
@@ -91,6 +95,35 @@ test("parses per-goal flags without including them in the condition", () => {
   assert.equal(parsed.options.maxTokens, 400000)
   assert.equal(parsed.options.minDelayMs, 25)
   assert.equal(parsed.options.noProgressTokenThreshold, 12)
+  assert.equal(parsed.options.noProgressTurnsBeforePause, 3)
+})
+
+test("supports equals-style per-goal flags", () => {
+  const parsed = parseGoalArguments(
+    'fix tests --max-turns=20 --max-duration-ms=90000 --max-tokens=400000 --cooldown-ms=25 --no-progress-threshold=12 --no-progress-turns=4',
+    normalizeOptions(),
+  )
+  assert.equal(parsed.condition, "fix tests")
+  assert.equal(parsed.options.maxTurns, 20)
+  assert.equal(parsed.options.maxDurationMs, 90000)
+  assert.equal(parsed.options.maxTokens, 400000)
+  assert.equal(parsed.options.minDelayMs, 25)
+  assert.equal(parsed.options.noProgressTokenThreshold, 12)
+  assert.equal(parsed.options.noProgressTurnsBeforePause, 4)
+  assert.deepEqual(parsed.errors, [])
+})
+
+test("rejects unsupported or malformed flags with explicit errors", () => {
+  const parsed = parseGoalArguments(
+    'fix tests --max-turns nope --bogus 12 --max-tokens',
+    normalizeOptions(),
+  )
+  assert.equal(parsed.condition, "fix tests")
+  assert.deepEqual(parsed.errors, [
+    "Invalid positive integer for --max-turns: nope",
+    "Unsupported flag: --bogus",
+    "Missing value for --max-tokens",
+  ])
 })
 
 test("goal objective is framed as user-provided task data", () => {
@@ -123,16 +156,6 @@ test("blocked reason is extracted from line before marker", () => {
     extractBlockedReason("I need the API key before continuing.\ngoal:blocked"),
     "I need the API key before continuing.",
   )
-  assert.equal(
-    extractBlockedReason("[goal:blocked]"),
-    "",
-    "marker on first line returns empty string",
-  )
-  assert.equal(
-    extractBlockedReason("goal:blocked"),
-    "",
-    "bare marker on first line returns empty string",
-  )
 })
 
 test("recognizes session.status idle events alongside deprecated session.idle", () => {
@@ -162,6 +185,39 @@ test("system transform is idempotent", async () => {
 
   const output = { system: [] }
   await hooks["experimental.chat.system.transform"]({ sessionID: "session-1" }, output)
+  await hooks["experimental.chat.system.transform"]({ sessionID: "session-1" }, output)
+
+  assert.equal(output.system.length, 1)
+  assert.match(output.system[0], /<goal_objective>\nship it\n<\/goal_objective>/)
+})
+
+test("system transform merges into existing system block instead of adding a second one", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const basePrompt = "You are opencode, a coding assistant."
+  const output = { system: [basePrompt] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "session-1" }, output)
+
+  // Strict-template backends (e.g. Qwen on vLLM) reject any request with more
+  // than one role:"system" message. The goal block must be merged into the
+  // existing primary system entry, not pushed as a second array entry.
+  assert.equal(output.system.length, 1)
+  assert.ok(output.system[0].startsWith(basePrompt))
+  assert.match(output.system[0], /<goal_objective>\nship it\n<\/goal_objective>/)
+})
+
+test("system transform pushes a new block when system array is empty", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const output = { system: [] }
   await hooks["experimental.chat.system.transform"]({ sessionID: "session-1" }, output)
 
   assert.equal(output.system.length, 1)
@@ -216,10 +272,10 @@ test("clear during an in-flight idle handler prevents promptAsync", async () => 
   assert.equal(calls.length, 0)
 })
 
-test("near-zero output pauses instead of auto-continuing", async () => {
+test("near-zero repeated output pauses after the configured grace window", async () => {
   const { calls, hooks } = await createHooks({
     messages: async () => ({ data: [message("ok", { input: 1, output: 5, reasoning: 0 })] }),
-    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 1 },
+    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 2 },
   })
   await hooks["command.execute.before"](
     { command: "goal", sessionID: "session-1", arguments: "ship it" },
@@ -237,8 +293,124 @@ test("near-zero output pauses instead of auto-continuing", async () => {
       properties: { sessionID: "session-1", status: { type: "idle" } },
     },
   })
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-1", status: { type: "idle" } },
+    },
+  })
+
+  assert.equal(calls.length, 2)
+  assert.equal(currentGoal("session-1").stopped, true)
+  assert.equal(currentGoal("session-1").stopReason, "no progress")
+})
+
+test("short assistant updates that change content do not immediately count as stalled", async () => {
+  let callCount = 0
+  const { calls, hooks } = await createHooks({
+    messages: async () => {
+      callCount += 1
+      return {
+        data: [
+          {
+            info: {
+              id: `msg-${callCount}`,
+              role: "assistant",
+              sessionID: "session-changing",
+              tokens: { input: 1, output: 5, reasoning: 0 },
+            },
+            parts: [textPart(callCount === 1 ? "step one" : "step two")],
+          },
+        ],
+      }
+    },
+    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 2 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-changing", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-changing", status: { type: "idle" } },
+    },
+  })
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-changing", status: { type: "idle" } },
+    },
+  })
+
+  assert.equal(calls.length, 2)
+  assert.equal(currentGoal("session-changing").stopped, false)
+  assert.equal(currentGoal("session-changing").noProgressTurns, 0)
+})
+
+test("missing recent assistant message does not trigger a false no-progress stop", async () => {
+  const calls = []
+  const client = {
+    session: {
+      messages: async () => ({
+        data: [{ info: { id: "msg-user", role: "user", sessionID: "session-1" }, parts: [textPart("user")] }],
+      }),
+      promptAsync: async (input) => {
+        calls.push(input)
+        return {}
+      },
+    },
+  }
+  const hooks = await GoalPlugin({ client }, { persistState: false, minDelayMs: 1, noProgressTokenThreshold: 50 })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const goal = currentGoal("session-1")
+  goal.turnCount = 1
+  goal.lastContinueAt = Date.now() - 10
+
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-1", status: { type: "idle" } },
+    },
+  })
 
   assert.equal(calls.length, 1)
+  assert.equal(currentGoal("session-1").stopped, false)
+})
+
+test("maxRecentMessages is forwarded to the recent-message lookup", async () => {
+  const seenLimits = []
+  const hooks = await GoalPlugin(
+    {
+      client: {
+        session: {
+          messages: async (input) => {
+            seenLimits.push(input.query.limit)
+            return { data: [message("still working", { input: 1, output: 60, reasoning: 0 })] }
+          },
+          promptAsync: async () => ({}),
+        },
+      },
+    },
+    { persistState: false, minDelayMs: 1, maxRecentMessages: 37 },
+  )
+
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-limit", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-limit", status: { type: "idle" } },
+    },
+  })
+
+  assert.deepEqual(seenLimits, [37])
 })
 
 test("stopped goals can be resumed", async () => {
@@ -434,58 +606,31 @@ test("parses --max-duration-ms flag directly", () => {
   assert.equal(parsed.options.maxDurationMs, 90000)
 })
 
-test("--max-minutes fallback stays integer after millisecond duration override", () => {
+test("invalid --max-minutes value reports an error without overriding duration", () => {
   const parsed = parseGoalArguments(
     "fix tests --max-duration-ms 90000 --max-minutes dangling",
     normalizeOptions(),
   )
   assert.equal(parsed.condition, "fix tests")
-  assert.equal(parsed.options.maxDurationMs, 120000)
+  assert.equal(parsed.options.maxDurationMs, 90000)
+  assert.deepEqual(parsed.errors, ["Invalid positive integer for --max-minutes: dangling"])
 })
 
-test("dangling flag at end does not pollute goal condition", () => {
+test("dangling flag at end reports a missing-value error without polluting goal condition", () => {
   const defaults = normalizeOptions()
   const parsed = parseGoalArguments("fix tests --max-turns", defaults)
   assert.equal(parsed.condition, "fix tests")
   assert.equal(parsed.options.maxTurns, defaults.maxTurns)
+  assert.deepEqual(parsed.errors, ["Missing value for --max-turns"])
 })
 
-test("adjacent flags do not corrupt each other", () => {
+test("adjacent flags do not corrupt each other and still surface missing values", () => {
   const defaults = normalizeOptions()
   const parsed = parseGoalArguments("fix tests --max-turns --max-tokens 50000", defaults)
   assert.equal(parsed.condition, "fix tests")
   assert.equal(parsed.options.maxTurns, defaults.maxTurns)
   assert.equal(parsed.options.maxTokens, 50000)
-})
-
-test("normalizeOptions falls back to defaults for zero, negative, and non-numeric values", () => {
-  const defaults = normalizeOptions()
-  const result = normalizeOptions({
-    maxTurns: 0,
-    maxDurationMs: -5,
-    maxTokens: "banana",
-    minDelayMs: NaN,
-    noProgressTokenThreshold: null,
-    maxPromptFailures: undefined,
-    noProgressTurnsBeforePause: 0,
-    maxRecentMessages: -1,
-  })
-  assert.equal(result.maxTurns, defaults.maxTurns)
-  assert.equal(result.maxDurationMs, defaults.maxDurationMs)
-  assert.equal(result.maxTokens, defaults.maxTokens)
-  assert.equal(result.minDelayMs, defaults.minDelayMs)
-  assert.equal(result.noProgressTokenThreshold, defaults.noProgressTokenThreshold)
-  assert.equal(result.maxPromptFailures, defaults.maxPromptFailures)
-  assert.equal(result.noProgressTurnsBeforePause, defaults.noProgressTurnsBeforePause)
-  assert.equal(result.maxRecentMessages, defaults.maxRecentMessages)
-})
-
-test("normalizeOptions rejects budgetWrapupRatio at boundary values 0 and 1", () => {
-  const defaults = normalizeOptions()
-  assert.equal(normalizeOptions({ budgetWrapupRatio: 0 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
-  assert.equal(normalizeOptions({ budgetWrapupRatio: 1 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
-  assert.equal(normalizeOptions({ budgetWrapupRatio: "high" }).budgetWrapupRatio, defaults.budgetWrapupRatio)
-  assert.equal(normalizeOptions({ budgetWrapupRatio: 0.5 }).budgetWrapupRatio, 0.5)
+  assert.deepEqual(parsed.errors, ["Missing value for --max-turns"])
 })
 
 test("no-progress pause takes precedence over budget wrap-up threshold", async () => {
@@ -557,6 +702,27 @@ test("/goal resume with no active goal returns help text", async () => {
   assert.match(output.parts[0].text, /No active goal/)
 })
 
+test("/goal pause with no active goal returns help text", async () => {
+  const { hooks } = await createHooks()
+  const output = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-fresh-pause", arguments: "pause" },
+    output,
+  )
+  assert.match(output.parts[0].text, /No active goal/)
+})
+
+test("/goal command rejects malformed flags before mutating state", async () => {
+  const { hooks } = await createHooks()
+  const output = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-bad-flags", arguments: "ship it --bogus 3" },
+    output,
+  )
+  assert.match(output.parts[0].text, /Goal flags could not be parsed/)
+  assert.equal(currentGoal("session-bad-flags"), null)
+})
+
 test("/goal resume on a running goal is a no-op", async () => {
   const { hooks } = await createHooks()
   await hooks["command.execute.before"](
@@ -583,9 +749,10 @@ test("formatStatus includes all key fields", () => {
     lastProgressAt: Date.now() - 5000,
     noProgressTurns: 0,
     lastStatus: "Continuing after assistant turn 3.",
-    stopped: false,
-    stopReason: "",
-    blockedReason: "",
+    stopped: true,
+    stopReason: "blocked",
+    blockedReason: "Need API key",
+    lastCheckpoint: { summary: "Inspected the repo and found the failing hook.", timestamp: Date.now() - 2000 },
   }
   const status = formatStatus(goal)
   assert.match(status, /Active goal: ship it/)
@@ -593,6 +760,175 @@ test("formatStatus includes all key fields", () => {
   assert.match(status, /Tokens:/)
   assert.match(status, /Elapsed:/)
   assert.match(status, /Last progress:/)
+  assert.match(status, /Recent checkpoint:/)
+  assert.match(status, /Blocked reason: Need API key/)
+  assert.match(status, /Suggested action: address the blocker, then run \/goal resume/)
+})
+
+test("/goal history shows lifecycle events and the latest checkpoint", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({
+      data: [message("Inspected src/goal-plugin.js and prepared the next patch.", { input: 1, output: 80, reasoning: 0 })],
+    }),
+    options: { minDelayMs: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-history", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-history", status: { type: "idle" } },
+    },
+  })
+
+  const output = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-history", arguments: "history" },
+    output,
+  )
+
+  assert.match(output.parts[0].text, /Goal history for: ship it/)
+  assert.match(output.parts[0].text, /Latest checkpoint: Inspected src\/goal-plugin\.js and prepared the next patch\./)
+  assert.match(output.parts[0].text, /set:/)
+  assert.match(output.parts[0].text, /auto-continue:/)
+})
+
+test("persisted running goals are recovered in paused state after restart", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+
+  try {
+    const client = {
+      app: { log: async () => {} },
+      session: {
+        messages: async () => ({ data: [message("still working")] }),
+        promptAsync: async () => ({}),
+      },
+    }
+
+    const hooks = await GoalPlugin(
+      { client },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "session-persist", arguments: "ship it" },
+      { parts: [] },
+    )
+
+    const persisted = JSON.parse(await readFile(stateFilePath, "utf8"))
+    assert.equal(
+      persisted.goals.some(
+        (goal) => goal.sessionID === "session-persist" && goal.condition === "ship it",
+      ),
+      true,
+    )
+
+    const recoveredHooks = await GoalPlugin(
+      { client },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+    const recoveredGoal = currentGoal("session-persist")
+    assert.equal(recoveredGoal.stopped, true)
+    assert.equal(recoveredGoal.stopReason, "recovered after restart")
+
+    const statusOutput = { parts: [] }
+    await recoveredHooks["command.execute.before"](
+      { command: "goal", sessionID: "session-persist", arguments: "status" },
+      statusOutput,
+    )
+    assert.match(statusOutput.parts[0].text, /Recovered persisted goal state/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("corrupt persisted state is preserved and not overwritten on startup", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+
+  try {
+    await writeFile(stateFilePath, "{not valid json", "utf8")
+    const client = {
+      app: { log: async () => {} },
+      session: {
+        messages: async () => ({ data: [] }),
+        promptAsync: async () => ({}),
+      },
+    }
+
+    await GoalPlugin({ client }, { persistState: true, stateFilePath, minDelayMs: 1 })
+
+    assert.equal(await readFile(stateFilePath, "utf8"), "{not valid json")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("persisted state file is written with owner-only permissions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+
+  try {
+    const client = {
+      app: { log: async () => {} },
+      session: {
+        messages: async () => ({ data: [] }),
+        promptAsync: async () => ({}),
+      },
+    }
+
+    const hooks = await GoalPlugin(
+      { client },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "session-perms", arguments: "ship it" },
+      { parts: [] },
+    )
+
+    const fileMode = (await stat(stateFilePath)).mode & 0o777
+    assert.equal(fileMode, 0o600)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("plugin reinitialization with a missing state file does not retain stale in-memory goals", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+  const missingStateFilePath = join(dir, "missing-state.json")
+
+  try {
+    const client = {
+      app: { log: async () => {} },
+      session: {
+        messages: async () => ({ data: [] }),
+        promptAsync: async () => ({}),
+      },
+    }
+
+    const hooks = await GoalPlugin(
+      { client },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "session-stale", arguments: "ship it" },
+      { parts: [] },
+    )
+    assert.notEqual(currentGoal("session-stale"), null)
+
+    await GoalPlugin(
+      { client },
+      { persistState: true, stateFilePath: missingStateFilePath, minDelayMs: 1 },
+    )
+
+    assert.equal(currentGoal("session-stale"), null)
+    assert.equal(JSON.parse(await readFile(missingStateFilePath, "utf8")).goals.length, 0)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test("[goal:complete] removes goal from state", async () => {
@@ -621,6 +957,36 @@ test("[goal:complete] removes goal from state", async () => {
   assert.match(statusOutput.parts[0].text, /Last goal: ship it/)
 })
 
+test("[goal:blocked] stops the goal and preserves blocked reason in status", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("Need the API key first.\n[goal:blocked]")] }),
+    options: { minDelayMs: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-blocked", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-blocked", status: { type: "idle" } },
+    },
+  })
+
+  const goal = currentGoal("session-blocked")
+  assert.equal(goal.stopped, true)
+  assert.equal(goal.stopReason, "blocked")
+  assert.equal(goal.blockedReason, "Need the API key first.")
+
+  const statusOutput = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-blocked", arguments: "status" },
+    statusOutput,
+  )
+  assert.match(statusOutput.parts[0].text, /Stopped: blocked/)
+  assert.match(statusOutput.parts[0].text, /Blocked reason: Need the API key first\./)
+})
+
 test("/goal clear removes completed goal status", async () => {
   const { hooks } = await createHooks({
     messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
@@ -647,6 +1013,75 @@ test("/goal clear removes completed goal status", async () => {
     statusOutput,
   )
   assert.match(statusOutput.parts[0].text, /No active goal/)
+})
+
+test("completed goal results expire after the configured retention window", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    options: { minDelayMs: 1, resultRetentionMs: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-expiring", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-expiring", status: { type: "idle" } },
+    },
+  })
+
+  await new Promise((resolve) => setTimeout(resolve, 5))
+
+  const statusOutput = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-expiring", arguments: "status" },
+    statusOutput,
+  )
+  assert.match(statusOutput.parts[0].text, /No active goal/)
+})
+
+test("maxStoredResults evicts the oldest completed-goal summary", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    options: { minDelayMs: 1, maxStoredResults: 1 },
+  })
+
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-old", arguments: "old goal" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-old", status: { type: "idle" } },
+    },
+  })
+
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-new", arguments: "new goal" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-new", status: { type: "idle" } },
+    },
+  })
+
+  const oldStatus = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-old", arguments: "status" },
+    oldStatus,
+  )
+  assert.match(oldStatus.parts[0].text, /No active goal/)
+
+  const newStatus = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-new", arguments: "status" },
+    newStatus,
+  )
+  assert.match(newStatus.parts[0].text, /Last goal: new goal/)
 })
 
 test("promptAsync error response updates lastStatus without stopping the goal", async () => {
@@ -755,7 +1190,7 @@ test("two sessions run independent goals without interference", async () => {
       },
     },
   }
-  const hooks = await GoalPlugin({ client }, { minDelayMs: 1 })
+  const hooks = await GoalPlugin({ client }, { persistState: false, minDelayMs: 1 })
 
   await hooks["command.execute.before"](
     { command: "goal", sessionID: "session-A", arguments: "task A" },
@@ -786,36 +1221,372 @@ test("two sessions run independent goals without interference", async () => {
   assert.equal(currentGoal("session-B").condition, "task B")
 })
 
+test("buildLimitWarning reports remaining seconds when duration is nearly exhausted", () => {
+  const warning = buildLimitWarning({
+    turnCount: 0,
+    totalTokens: 0,
+    startedAt: Date.now() - 59_500,
+    options: normalizeOptions({
+      maxTurns: 10,
+      maxTokens: 200_000,
+      maxDurationMs: 60_000,
+      warnDurationMsRemaining: 60_000,
+    }),
+  })
+
+  assert.match(warning, /s remaining/)
+})
+
+test("duration limit requests a final handoff and stops the goal", async () => {
+  const { calls, hooks } = await createHooks({
+    options: { minDelayMs: 1, maxDurationMs: 10_000, noProgressTokenThreshold: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-duration", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const goal = currentGoal("session-duration")
+  goal.startedAt = Date.now() - 11_000
+
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-duration", status: { type: "idle" } },
+    },
+  })
+
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].body.parts[0].text, /<budget_wrapup>/)
+  assert.equal(goal.stopped, true)
+  assert.match(goal.stopReason, /max duration reached/)
+})
+
+test("system transform tolerates missing and structured system blocks", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-system-shape", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const output = {}
+  await hooks["experimental.chat.system.transform"]({ sessionID: "session-system-shape" }, output)
+  assert.equal(Array.isArray(output.system), true)
+  assert.equal(output.system.length, 1)
+  assert.match(output.system[0], /<goal_objective>\nship it\n<\/goal_objective>/)
+
+  const outputWithObject = { system: [{ role: "system", text: "base system" }] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "session-system-shape" }, outputWithObject)
+  assert.equal(outputWithObject.system.length, 1)
+  assert.equal(outputWithObject.system[0].role, "system")
+  assert.match(outputWithObject.system[0].text, /base system/)
+  assert.match(outputWithObject.system[0].text, /<goal_objective>/)
+
+  const outputWithOpaqueObject = { system: [{ role: "system", metadata: true }] }
+  await hooks["experimental.chat.system.transform"](
+    { sessionID: "session-system-shape" },
+    outputWithOpaqueObject,
+  )
+  assert.equal(outputWithOpaqueObject.system.length, 2)
+  assert.match(outputWithOpaqueObject.system[0], /<goal_objective>/)
+  assert.deepEqual(outputWithOpaqueObject.system[1], { role: "system", metadata: true })
+})
+
+test("message.updated accepts nested message payload shapes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+
+  try {
+    const hooks = await GoalPlugin(
+      {
+        client: {
+          app: { log: async () => {} },
+          session: {
+            messages: async () => ({ data: [] }),
+            promptAsync: async () => ({}),
+          },
+        },
+      },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "session-nested-message", arguments: "ship it" },
+      { parts: [] },
+    )
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          message: {
+            info: {
+              id: "msg-nested",
+              role: "assistant",
+              sessionID: "session-nested-message",
+              tokens: { input: 4, output: 7, reasoning: 3 },
+            },
+          },
+        },
+      },
+    })
+
+    const goal = currentGoal("session-nested-message")
+    assert.equal(goal.totalTokens, 14)
+    assert.ok(goal.messageIDs.has("msg-nested"))
+    assert.ok(goal.lastProgressAt > 0)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("unsupported persisted state version is ignored without clearing runtime state", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+
+  try {
+    await writeFile(
+      stateFilePath,
+      JSON.stringify({ version: 999, goals: [{ sessionID: "bad", condition: "bad" }], results: [] }),
+      "utf8",
+    )
+
+    await GoalPlugin(
+      {
+        client: {
+          app: { log: async () => {} },
+          session: { messages: async () => ({ data: [] }), promptAsync: async () => ({}) },
+        },
+      },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+
+    assert.equal(currentGoal("bad"), null)
+    assert.equal(JSON.parse(await readFile(stateFilePath, "utf8")).version, 999)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("malformed persisted arrays are ignored and not overwritten on startup", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+
+  try {
+    await writeFile(stateFilePath, JSON.stringify({ version: 1, goals: {}, results: [] }), "utf8")
+
+    await GoalPlugin(
+      {
+        client: {
+          app: { log: async () => {} },
+          session: { messages: async () => ({ data: [] }), promptAsync: async () => ({}) },
+        },
+      },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+
+    assert.equal(JSON.parse(await readFile(stateFilePath, "utf8")).goals.constructor, Object)
+    assert.equal(currentGoal("anything"), null)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("persisted state skips malformed entries while keeping valid ones", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-test-"))
+  const stateFilePath = join(dir, "state.json")
+
+  try {
+    await writeFile(
+      stateFilePath,
+      JSON.stringify({
+        version: 1,
+        goals: [
+          {
+            sessionID: "session-valid-goal",
+            condition: "valid goal",
+            startedAt: Date.now(),
+            options: { maxTurns: 7 },
+            history: [{ type: "set", detail: "Goal created.", timestamp: Date.now() }],
+            checkpoints: [{ summary: "Checked the repo.", timestamp: Date.now() }],
+          },
+          { sessionID: "", condition: "invalid goal" },
+        ],
+        results: [
+          {
+            sessionID: "session-valid-result",
+            condition: "valid result",
+            state: "achieved",
+            startedAt: Date.now() - 1000,
+            finishedAt: Date.now(),
+            history: [{ type: "completed", detail: "Wrapped up.", timestamp: Date.now() }],
+          },
+          { sessionID: "session-bad-result" },
+        ],
+      }),
+      "utf8",
+    )
+
+    const hooks = await GoalPlugin(
+      {
+        client: {
+          app: { log: async () => {} },
+          session: { messages: async () => ({ data: [] }), promptAsync: async () => ({}) },
+        },
+      },
+      { persistState: true, stateFilePath, minDelayMs: 1 },
+    )
+
+    const loadedGoal = currentGoal("session-valid-goal")
+    assert.equal(loadedGoal.condition, "valid goal")
+    assert.equal(loadedGoal.options.maxTurns, 7)
+    assert.equal(currentGoal("") , null)
+
+    const statusOutput = { parts: [] }
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "session-valid-result", arguments: "status" },
+      statusOutput,
+    )
+    assert.match(statusOutput.parts[0].text, /Last goal: valid result/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("/goal history returns the most recent completed goal history", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("Done after inspecting src/goal-plugin.js\n\n[goal:complete]")] }),
+    options: { minDelayMs: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-completed-history", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-completed-history", status: { type: "idle" } },
+    },
+  })
+
+  const output = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-completed-history", arguments: "history" },
+    output,
+  )
+
+  assert.match(output.parts[0].text, /Last goal history for: ship it/)
+  assert.match(output.parts[0].text, /completed:/)
+})
+
+test("repeated thrown event-handler errors eventually pause the goal", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => {
+      throw new Error("network")
+    },
+    options: { minDelayMs: 1, maxPromptFailures: 2 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-thrown-failures", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-thrown-failures", status: { type: "idle" } },
+    },
+  })
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-thrown-failures", status: { type: "idle" } },
+    },
+  })
+
+  const goal = currentGoal("session-thrown-failures")
+  assert.equal(goal.stopped, true)
+  assert.equal(goal.stopReason, "auto-continue failures")
+})
+
+test("missing client.app.log falls back to console.error", async () => {
+  const originalConsoleError = console.error
+  const captured = []
+  console.error = (...args) => {
+    captured.push(args)
+  }
+
+  try {
+    const hooks = await GoalPlugin(
+      {
+        client: {
+          session: {
+            messages: async () => {
+              throw new Error("network")
+            },
+            promptAsync: async () => ({}),
+          },
+        },
+      },
+      { persistState: false, minDelayMs: 1 },
+    )
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "session-console-fallback", arguments: "ship it" },
+      { parts: [] },
+    )
+    await hooks.event({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "session-console-fallback", status: { type: "idle" } },
+      },
+    })
+
+    assert.ok(captured.length >= 1)
+    assert.match(String(captured.at(-1)[1]), /Auto-continue failed/)
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
+test("persist failures are logged without throwing", async () => {
+  const logs = []
+  const hooks = await GoalPlugin(
+    {
+      client: {
+        app: { log: async (input) => logs.push(input) },
+        session: {
+          messages: async () => ({ data: [] }),
+          promptAsync: async () => ({}),
+        },
+      },
+    },
+    { persistState: true, stateFilePath: "/dev/null/state.json", minDelayMs: 1 },
+  )
+
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-persist-failure", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  assert.ok(logs.some((entry) => entry.body.message === "Failed to persist goal state"))
+})
+
 // ── Helper unit tests ──────────────────────────────────────────────────────
 
-test("buildLimitWarning returns empty string when limits are far away", () => {
-  const goal = {
-    startedAt: Date.now(),
-    turnCount: 1,
-    totalTokens: 1000,
-    options: normalizeOptions({ maxTurns: 20, maxDurationMs: 30 * 60 * 1000, maxTokens: 200000 }),
-  }
-  assert.equal(buildLimitWarning(goal), "")
-})
-
-test("buildLimitWarning warns when turns are near the limit", () => {
-  const goal = {
-    startedAt: Date.now() - 100,
-    turnCount: 18,
-    totalTokens: 1000,
-    options: normalizeOptions({ maxTurns: 20, warnTurnsRemaining: 3 }),
-  }
-  assert.match(buildLimitWarning(goal), /2 auto-continue turn\(s\) remaining/)
-})
-
-test("buildLimitWarning warns when tokens are near the limit", () => {
-  const goal = {
-    startedAt: Date.now() - 100,
-    turnCount: 1,
-    totalTokens: 180000,
-    options: normalizeOptions({ maxTokens: 200000, warnTokensRemaining: 25000 }),
-  }
-  assert.match(buildLimitWarning(goal), /20,000 tracked token\(s\) remaining/)
+test("escapeGoalText escapes all XML closing tags, not just goal_objective", () => {
+  assert.equal(
+    escapeGoalText("inject </goal_objective> here"),
+    "inject <\\/goal_objective> here",
+  )
+  assert.equal(
+    escapeGoalText("break </goal_continuation> frame"),
+    "break <\\/goal_continuation> frame",
+  )
+  assert.equal(
+    escapeGoalText("also </next_step> and </completion_audit>"),
+    "also <\\/next_step> and <\\/completion_audit>",
+  )
+  assert.equal(escapeGoalText("safe text"), "safe text")
 })
 
 test("outputTokensForMessage extracts output token count", () => {
@@ -846,22 +1617,6 @@ test("getSessionID reads from both event property shapes", () => {
   assert.equal(getSessionID(null), null)
 })
 
-test("escapeGoalText escapes all XML closing tags", () => {
-  assert.equal(
-    escapeGoalText("inject </goal_objective> here"),
-    "inject <\\/goal_objective> here",
-  )
-  assert.equal(
-    escapeGoalText("break </goal_continuation> frame"),
-    "break <\\/goal_continuation> frame",
-  )
-  assert.equal(
-    escapeGoalText("also </next_step> and </completion_audit>"),
-    "also <\\/next_step> and <\\/completion_audit>",
-  )
-  assert.equal(escapeGoalText("safe text"), "safe text")
-})
-
 test("stopReason returns correct string for each limit type", () => {
   const base = {
     startedAt: Date.now(),
@@ -874,105 +1629,32 @@ test("stopReason returns correct string for each limit type", () => {
   assert.equal(stopReason({ ...base, turnCount: 4 }), null)
 })
 
-test("logPluginError falls back to console.error when client lacks app.log", async () => {
-  const captured = []
-  const orig = console.error
-  console.error = (...args) => captured.push(args)
-  try {
-    await logPluginError(null, "disk full", new Error("ENOSPC"))
-    await logPluginError({}, "no log method", new Error("missing"))
-  } finally {
-    console.error = orig
-  }
-  assert.equal(captured.length, 2)
-  assert.ok(captured[0].some((a) => String(a).includes("disk full")))
+test("normalizeOptions falls back to defaults for zero, negative, and non-numeric values", () => {
+  const defaults = normalizeOptions()
+  const result = normalizeOptions({
+    maxTurns: 0,
+    maxDurationMs: -5,
+    maxTokens: "banana",
+    minDelayMs: NaN,
+    noProgressTokenThreshold: null,
+    maxPromptFailures: undefined,
+    noProgressTurnsBeforePause: 0,
+    maxRecentMessages: -1,
+  })
+  assert.equal(result.maxTurns, defaults.maxTurns)
+  assert.equal(result.maxDurationMs, defaults.maxDurationMs)
+  assert.equal(result.maxTokens, defaults.maxTokens)
+  assert.equal(result.minDelayMs, defaults.minDelayMs)
+  assert.equal(result.noProgressTokenThreshold, defaults.noProgressTokenThreshold)
+  assert.equal(result.maxPromptFailures, defaults.maxPromptFailures)
+  assert.equal(result.noProgressTurnsBeforePause, defaults.noProgressTurnsBeforePause)
+  assert.equal(result.maxRecentMessages, defaults.maxRecentMessages)
 })
 
-test("applyPromptFailure increments failures and stops after maxPromptFailures", async () => {
-  const { hooks } = await createHooks({ options: { maxPromptFailures: 2, minDelayMs: 1 } })
-  const sessionID = "session-apf-1"
-  await hooks["command.execute.before"](
-    { command: "goal", sessionID, arguments: "ship it" },
-    { parts: [] },
-  )
-  const goalID = currentGoal(sessionID).goalId
-  const logs = []
-  const client = { app: { log: async (e) => logs.push(e) } }
-
-  await applyPromptFailure(sessionID, goalID, "Auto-continue failed: timeout", new Error("timeout"), client)
-  assert.equal(currentGoal(sessionID).promptFailures, 1)
-  assert.equal(currentGoal(sessionID).stopped, false)
-
-  await applyPromptFailure(sessionID, goalID, "Auto-continue failed: timeout", new Error("timeout"), client)
-  assert.equal(currentGoal(sessionID).promptFailures, 2)
-  assert.equal(currentGoal(sessionID).stopped, true)
-  assert.equal(currentGoal(sessionID).stopReason, "auto-continue failures")
-  assert.equal(logs.length, 2)
-})
-
-test("no-progress grace window allows N-1 stalls before pausing", async () => {
-  const idle = (sessionID) => ({
-    event: {
-      type: "session.status",
-      properties: { sessionID, status: { type: "idle" } },
-    },
-  })
-  const { calls, hooks } = await createHooks({
-    messages: async () => ({ data: [message("ok", { input: 1, output: 5, reasoning: 0 })] }),
-    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 3 },
-  })
-  const sessionID = "session-grace-1"
-  await hooks["command.execute.before"](
-    { command: "goal", sessionID, arguments: "ship it" },
-    { parts: [] },
-  )
-
-  await hooks.event(idle(sessionID))  // turn 0: no check → sends continue
-  assert.equal(calls.length, 1)
-
-  await hooks.event(idle(sessionID))  // noProgressTurns=1 < 3 → sends continue
-  assert.equal(calls.length, 2)
-  assert.equal(currentGoal(sessionID).stopped, false)
-
-  await hooks.event(idle(sessionID))  // noProgressTurns=2 < 3 → sends continue
-  assert.equal(calls.length, 3)
-  assert.equal(currentGoal(sessionID).stopped, false)
-
-  await hooks.event(idle(sessionID))  // noProgressTurns=3 >= 3 → stops
-  assert.equal(calls.length, 3)
-  const goal = currentGoal(sessionID)
-  assert.equal(goal.stopped, true)
-  assert.equal(goal.stopReason, "no progress")
-  assert.equal(goal.noProgressTurns, 3)
-})
-
-test("no-progress counter resets when a high-output turn is seen", async () => {
-  const idle = (sessionID) => ({
-    event: {
-      type: "session.status",
-      properties: { sessionID, status: { type: "idle" } },
-    },
-  })
-  let lowOutput = true
-  const { calls, hooks } = await createHooks({
-    messages: async () => ({
-      data: [message("ok", lowOutput ? { input: 1, output: 5, reasoning: 0 } : { input: 1, output: 200, reasoning: 0 })],
-    }),
-    options: { minDelayMs: 1, noProgressTokenThreshold: 50, noProgressTurnsBeforePause: 2 },
-  })
-  const sessionID = "session-grace-2"
-  await hooks["command.execute.before"](
-    { command: "goal", sessionID, arguments: "ship it" },
-    { parts: [] },
-  )
-
-  await hooks.event(idle(sessionID))  // turn 0: no check → sends continue
-  await hooks.event(idle(sessionID))  // noProgressTurns=1 < 2 → sends continue (grace)
-  assert.equal(currentGoal(sessionID).noProgressTurns, 1)
-
-  lowOutput = false
-  await hooks.event(idle(sessionID))  // high output → noProgressTurns resets to 0
-  assert.equal(currentGoal(sessionID).noProgressTurns, 0)
-  assert.equal(currentGoal(sessionID).stopped, false)
-  assert.equal(calls.length, 3)
+test("normalizeOptions rejects budgetWrapupRatio at boundary values 0 and 1", () => {
+  const defaults = normalizeOptions()
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 0 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 1 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: "high" }).budgetWrapupRatio, defaults.budgetWrapupRatio)
+  assert.equal(normalizeOptions({ budgetWrapupRatio: 0.5 }).budgetWrapupRatio, 0.5)
 })

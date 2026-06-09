@@ -1,6 +1,6 @@
 {
   "name": "opencode-goal-plugin",
-  "version": "0.1.8",
+  "version": "0.1.11",
   "description": "Session-scoped /goal workflow for OpenCode.",
   "type": "module",
   "main": "./src/goal-plugin.js",
@@ -16,10 +16,12 @@
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
-    "LICENSE"
+    "LICENSE",
+    ".nvmrc"
   ],
   "scripts": {
     "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage",
     "smoke": "node scripts/smoke-command-hook.mjs",
     "check": "node -c src/goal-plugin.js && npm test",
     "pack:check": "npm pack --dry-run"

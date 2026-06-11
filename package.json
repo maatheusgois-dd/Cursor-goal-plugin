@@ -1,6 +1,6 @@
 {
   "name": "opencode-goal-plugin",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Session-scoped /goal workflow for OpenCode.",
   "type": "module",
   "main": "./src/goal-plugin.js",

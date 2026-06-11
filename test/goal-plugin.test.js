@@ -142,7 +142,7 @@ test("continue message includes budget context and completion audit", () => {
     options: normalizeOptions({ maxTokens: 100, maxTurns: 5 }),
   })
   assert.match(messageText, /<progress_budget>/)
-  assert.match(messageText, /tracked_tokens_remaining: 75/)
+  assert.match(messageText, /context_tokens_remaining: 75/)
   assert.match(messageText, /<completion_audit>/)
   assert.match(messageText, /treat completion as unproven/)
 })
@@ -600,6 +600,82 @@ test("non-assistant token updates count toward budget but do not reset progress"
   assert.equal(goal.lastProgressAt, 0)
 })
 
+test("token tracking uses context window size, not cumulative API consumption", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-ctx", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const goal = currentGoal("session-ctx")
+
+  // First message: small context
+  await hooks.event({
+    event: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-1",
+          role: "assistant",
+          sessionID: "session-ctx",
+          tokens: { input: 5000, output: 1000, reasoning: 200 },
+        },
+      },
+    },
+  })
+  assert.equal(goal.totalTokens, 6200)
+
+  // Second message: context has grown (input includes prior turn)
+  await hooks.event({
+    event: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-2",
+          role: "assistant",
+          sessionID: "session-ctx",
+          tokens: { input: 7200, output: 1500, reasoning: 300 },
+        },
+      },
+    },
+  })
+  // totalTokens should be the peak context size (9000), NOT 6200+9000=15200
+  assert.equal(goal.totalTokens, 9000)
+
+  // Streaming update for same message grows tokens progressively
+  await hooks.event({
+    event: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-2",
+          role: "assistant",
+          sessionID: "session-ctx",
+          tokens: { input: 7200, output: 2000, reasoning: 300 },
+        },
+      },
+    },
+  })
+  assert.equal(goal.totalTokens, 9500)
+
+  // A smaller message should NOT shrink the context
+  await hooks.event({
+    event: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-3",
+          role: "user",
+          sessionID: "session-ctx",
+          tokens: { input: 3000, output: 50, reasoning: 0 },
+        },
+      },
+    },
+  })
+  // Math.max keeps the peak at 9500, not shrinking to 3050
+  assert.equal(goal.totalTokens, 9500)
+})
+
 test("parses --max-duration-ms flag directly", () => {
   const parsed = parseGoalArguments("fix tests --max-duration-ms 90000", normalizeOptions())
   assert.equal(parsed.condition, "fix tests")
@@ -757,7 +833,7 @@ test("formatStatus includes all key fields", () => {
   const status = formatStatus(goal)
   assert.match(status, /Active goal: ship it/)
   assert.match(status, /Auto-continues sent: 3\/10/)
-  assert.match(status, /Tokens:/)
+  assert.match(status, /Context tokens:/)
   assert.match(status, /Elapsed:/)
   assert.match(status, /Last progress:/)
   assert.match(status, /Recent checkpoint:/)
@@ -1625,7 +1701,7 @@ test("stopReason returns correct string for each limit type", () => {
   }
   assert.match(stopReason({ ...base, turnCount: 5 }), /max turns/)
   assert.match(stopReason({ ...base, turnCount: 4, startedAt: Date.now() - 70000 }), /max duration/)
-  assert.match(stopReason({ ...base, turnCount: 4, totalTokens: 1000 }), /max tokens/)
+  assert.match(stopReason({ ...base, turnCount: 4, totalTokens: 1000 }), /max context tokens/)
   assert.equal(stopReason({ ...base, turnCount: 4 }), null)
 })
 

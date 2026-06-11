@@ -110,15 +110,15 @@ Markers must appear on their own final line. The bracketed form is canonical, bu
 |---|---|
 | Auto-continue turns | 10 |
 | Max duration | 15 minutes |
-| Tracked tokens | 200,000 |
+| Context tokens | 200,000 |
 | Min delay between continues | 1.5 seconds |
 | No-progress pause | < 50 output tokens on a stalled turn (after a 2-turn grace window) |
-| Budget wrap-up threshold | 80% of tracked token budget |
+| Budget wrap-up threshold | 80% of context token budget |
 | Auto-continue failure pause | 3 consecutive prompt failures |
 
 **Effective turn count.** Each LLM turn on a real task typically takes 30–90 seconds. At that latency, raising `--max-minutes` is usually more useful than raising `--max-turns`. At 45 s/turn, the default 15-minute window gives roughly 15–20 turns of headroom before the turn limit becomes the binding brake.
 
-**Token budget.** The plugin tracks `input + output + reasoning` tokens across all session messages. In high-context sessions (large codebases, long conversation history), input overhead per turn can be substantial and the budget may be exhausted before the turn limit is reached. Treat it as a safety brake, not precise billing accounting.
+**Token budget.** The plugin tracks the session's context window size (`input + output + reasoning` tokens on the latest message). This matches the token count that OpenCode displays, so the numbers should be consistent. When the context window reaches the `--max-tokens` limit, the plugin sends a wrap-up prompt and stops. In high-context sessions (large codebases, long conversation history), the context can grow quickly — treat the budget as a safety brake.
 
 **No-progress heuristic.** A low-output turn does not pause immediately anymore. The plugin pauses only after `noProgressTurnsBeforePause` consecutive *stalled* low-output turns — repeated turns with very little output and no meaningful change in the latest assistant checkpoint.
 
@@ -141,7 +141,7 @@ Override any limit for a single goal:
 | `--max-turns <n>` | Auto-continue turn limit |
 | `--max-minutes <n>` | Duration limit in minutes |
 | `--max-duration-ms <n>` | Duration limit in milliseconds |
-| `--max-tokens <n>` | Tracked token limit |
+| `--max-tokens <n>` | Context token limit |
 | `--cooldown-ms <n>` | Minimum delay between continues |
 | `--no-progress-threshold <n>` | Output token floor before pausing |
 | `--no-progress-turns <n>` | Consecutive stalled low-output turns before pausing |

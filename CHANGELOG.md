@@ -2,9 +2,19 @@
 
 ## Unreleased
 
+## 0.1.13 — 2026-06-11
+
+> Fixes a significant token-tracking bug where the reported token count could be 5–10× higher than what OpenCode displays, making budgets appear exhausted far sooner than expected.
+
+- **Fix token tracking to use context window size instead of cumulative API consumption.** Each `message.updated` event carries `input + output + reasoning` tokens where `input` already includes the full conversation context. Accumulating deltas across messages re-counted prior turns every time, inflating the total. The plugin now uses `Math.max` across all message updates so `totalTokens` reflects the peak context window size — matching what OpenCode reports.
+- Rename `tracked_tokens_used` / `tracked_tokens_remaining` → `context_tokens_used` / `context_tokens_remaining` in continuation prompts.
+- Rename `Tokens:` → `Context tokens:` in status and result displays.
+- Rename `tracked token limit` / `tracked token budget` → `context token limit` / `context token budget` in all user-facing messages.
+- Add regression test verifying that multi-message token tracking no longer accumulates across turns.
+
 ## 0.1.12 — 2026-06-08
 
-- Harden `escapeGoalText` to escape all XML closing tags (`</` → `<\/`) instead of only `</goal_objective>`, closing a prompt-injection path where user-supplied goal text could break structural framing in the continuation message.
+- Harden `escapeGoalText` to escape all XML closing tags (`</` → `<\\/`) instead of only `</goal_objective>`, closing a prompt-injection path where user-supplied goal text could break structural framing in the continuation message.
 - Add unit tests for `outputTokensForMessage`, `budgetWrapupNeeded`, `getSessionID`, `stopReason`, `normalizeOptions` boundary inputs (zero, negative, NaN, null, `budgetWrapupRatio` at 0 and 1), and `escapeGoalText` covering all structural tags.
 
 ## 0.1.11 — 2026-06-04

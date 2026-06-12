@@ -142,7 +142,7 @@ function formatStatus(goal) {
   const lines = [
     `Active goal: ${goal.condition}`,
     `Auto-continues sent: ${goal.turnCount}/${goal.options.maxTurns}`,
-    `Tokens: ${goal.totalTokens.toLocaleString()}/${goal.options.maxTokens.toLocaleString()}`,
+    `Context tokens: ${goal.totalTokens.toLocaleString()}/${goal.options.maxTokens.toLocaleString()}`,
     `Elapsed: ${elapsed}s/${Math.round(goal.options.maxDurationMs / 1000)}s`,
     `Last progress: ${lastProgress}`,
     `No-progress turns: ${goal.noProgressTurns}`,
@@ -168,7 +168,7 @@ function formatGoalResult(result) {
     `Last goal: ${result.condition}`,
     `State: ${result.state}`,
     `Auto-continues sent: ${result.turnCount}`,
-    `Tokens: ${result.totalTokens.toLocaleString()}`,
+    `Context tokens: ${result.totalTokens.toLocaleString()}`,
     `Elapsed: ${elapsed}s`,
     `Last checkpoint: ${lastCheckpoint}`,
     `Last status: ${result.lastStatus || "No status recorded."}`,
@@ -198,7 +198,7 @@ function stopReason(goal) {
   if (Date.now() - goal.startedAt >= goal.options.maxDurationMs) {
     return `max duration reached (${Math.round(goal.options.maxDurationMs / 1000)}s)`
   }
-  if (goal.totalTokens >= goal.options.maxTokens) return `max tokens reached (${goal.options.maxTokens})`
+  if (goal.totalTokens >= goal.options.maxTokens) return `max context tokens reached (${goal.options.maxTokens.toLocaleString()})`
   return null
 }
 
@@ -679,7 +679,7 @@ function buildLimitWarning(goal) {
     warnings.push(`${Math.max(0, Math.round(remainingMs / 1000))}s remaining`)
   }
   if (remainingTokens <= goal.options.warnTokensRemaining) {
-    warnings.push(`${Math.max(0, remainingTokens).toLocaleString()} tracked token(s) remaining`)
+    warnings.push(`${Math.max(0, remainingTokens).toLocaleString()} context token(s) remaining`)
   }
 
   return warnings.length ? ` Limits are near: ${warnings.join(", ")}.` : ""
@@ -711,8 +711,8 @@ function buildContinueMessage(goal, { budgetWrapup = false } = {}) {
     "<progress_budget>",
     `auto_continues_used: ${goal.turnCount}`,
     `auto_continues_remaining: ${remainingTurns}`,
-    `tracked_tokens_used: ${goal.totalTokens}`,
-    `tracked_tokens_remaining: ${remainingTokens}`,
+    `context_tokens_used: ${goal.totalTokens}`,
+    `context_tokens_remaining: ${remainingTokens}`,
     `elapsed_seconds: ${elapsedSeconds}`,
     "</progress_budget>",
     "",
@@ -721,7 +721,7 @@ function buildContinueMessage(goal, { budgetWrapup = false } = {}) {
   if (budgetWrapup) {
     lines.push(
       "<budget_wrapup>",
-      "This goal is near its tracked token limit. Finish the current step if it is small and safe.",
+      "This goal is near its context token limit. Finish the current step if it is small and safe.",
       "Then write a concise handoff summary covering what is done, what remains, and the next concrete command or file to inspect.",
       "Do not output [goal:complete] unless the goal is actually finished and verified.",
       "After the handoff, stop.",
@@ -1030,7 +1030,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       pushHistory(
         goal,
         "set",
-        `Goal created with limits: ${goal.options.maxTurns} auto-continues, ${Math.round(goal.options.maxDurationMs / 1000)}s, ${goal.options.maxTokens.toLocaleString()} tracked tokens.`,
+        `Goal created with limits: ${goal.options.maxTurns} auto-continues, ${Math.round(goal.options.maxDurationMs / 1000)}s, ${goal.options.maxTokens.toLocaleString()} context tokens.`,
       )
 
       cleanupGoal(sessionID)
@@ -1049,7 +1049,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             "",
             `Limits: ${goal.options.maxTurns} auto-continues, ${Math.round(
               goal.options.maxDurationMs / 1000,
-            )}s, ${goal.options.maxTokens.toLocaleString()} tracked tokens.`,
+            )}s, ${goal.options.maxTokens.toLocaleString()} context tokens.`,
           ].join("\n"),
         ),
       ]
@@ -1072,7 +1072,13 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         const currentTokens = totalTokensForMessage(message)
         const previousTokens = seenTokens.get(currentMessageID) || 0
         if (currentTokens > previousTokens) {
-          goal.totalTokens += currentTokens - previousTokens
+          // Track the context window size (peak input+output+reasoning),
+          // not cumulative API token consumption. Each message's tokens
+          // include the full conversation context, so accumulating deltas
+          // across messages inflates the count by re-counting prior turns.
+          // Using Math.max gives the current context size, matching what
+          // OpenCode displays and making the budget check intuitive.
+          goal.totalTokens = Math.max(goal.totalTokens, currentTokens)
           seenTokens.set(currentMessageID, currentTokens)
           goal.messageIDs.add(currentMessageID)
           changed = true
@@ -1261,7 +1267,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
               activeGoalAfterPrompt,
               budgetWrapup ? "budget-wrapup" : "auto-continue",
               budgetWrapup
-                ? "Sent a final handoff request near the tracked token budget."
+                ? "Sent a final handoff request near the context token budget."
                 : `Sent auto-continue prompt ${activeGoalAfterPrompt.turnCount}/${activeGoalAfterPrompt.options.maxTurns}.`,
             )
           }

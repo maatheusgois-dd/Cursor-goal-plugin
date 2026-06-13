@@ -285,6 +285,16 @@ function currentGoal(sessionID, goalID) {
   return goal
 }
 
+// Like currentGoal, but also returns null if the goal was stopped (paused,
+// cleared-and-replaced, blocked) while an async step was in flight. Used at the
+// post-await re-checks so a `/goal pause` issued during messages-fetch or the
+// cooldown sleep actually prevents the next auto-continue from firing.
+function activeGoal(sessionID, goalID) {
+  const goal = currentGoal(sessionID, goalID)
+  if (!goal || goal.stopped) return null
+  return goal
+}
+
 function toPositiveInteger(value, fallback) {
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
@@ -685,10 +695,28 @@ function buildLimitWarning(goal) {
   return warnings.length ? ` Limits are near: ${warnings.join(", ")}.` : ""
 }
 
+// Tag names the plugin uses to frame its own instructions. Goal text must not
+// be able to forge either an opening or a closing form of any of these.
+const STRUCTURAL_TAGS = [
+  "goal_continuation",
+  "goal_objective",
+  "progress_budget",
+  "budget_wrapup",
+  "next_step",
+  "completion_audit",
+]
+const STRUCTURAL_OPEN_TAG_RE = new RegExp(`<(${STRUCTURAL_TAGS.join("|")})\\b`, "gi")
+
 function escapeGoalText(text) {
   // Escape every XML closing tag so user-supplied goal text cannot break the
-  // structural framing used in buildGoalBlock and buildContinueMessage.
-  return String(text).replaceAll("</", "<\\/")
+  // structural framing used in buildGoalBlock and buildContinueMessage...
+  let escaped = String(text).replaceAll("</", "<\\/")
+  // ...and neutralize opening forms of the plugin's own structural tags so goal
+  // text cannot inject a forged block (e.g. <budget_wrapup>, <next_step>) that
+  // mimics elevated instructions. Closing forms are already broken above, so
+  // this regex only matches genuine `<tag` openings.
+  escaped = escaped.replace(STRUCTURAL_OPEN_TAG_RE, "<\\$1")
+  return escaped
 }
 
 function buildGoalBlock(goal) {
@@ -798,12 +826,23 @@ function messageTokens(message) {
       : {}
 }
 
+function cacheTokensForMessage(tokens) {
+  // OpenCode reports cached context separately as `cache: { read, write }`.
+  // On cache-heavy providers (e.g. Anthropic prompt caching) most of the
+  // conversation context arrives as `cache.read` with a small `input`, so the
+  // cache fields must be counted toward the context-window estimate or the
+  // token budget is undercounted by an order of magnitude.
+  const cache = isPlainObject(tokens.cache) ? tokens.cache : {}
+  return toNonNegativeInteger(cache.read) + toNonNegativeInteger(cache.write)
+}
+
 function totalTokensForMessage(message) {
   const tokens = messageTokens(message)
   return (
     toNonNegativeInteger(tokens.input) +
     toNonNegativeInteger(tokens.output) +
-    toNonNegativeInteger(tokens.reasoning)
+    toNonNegativeInteger(tokens.reasoning) +
+    cacheTokensForMessage(tokens)
   )
 }
 
@@ -1112,7 +1151,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           path: { id: sessionID },
           query: { limit: goal.options.maxRecentMessages },
         })
-        const activeGoalAfterMessages = currentGoal(sessionID, goalID)
+        const activeGoalAfterMessages = activeGoal(sessionID, goalID)
         if (!activeGoalAfterMessages) return
 
         const latestAssistant = findLatestAssistantMessage(messages.data)
@@ -1217,7 +1256,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           await sleep(activeGoalAfterMessages.options.minDelayMs - elapsedSinceLastContinue)
         }
 
-        const activeGoalBeforePrompt = currentGoal(sessionID, goalID)
+        const activeGoalBeforePrompt = activeGoal(sessionID, goalID)
         if (!activeGoalBeforePrompt) return
 
         const budgetWrapup = budgetWrapupNeeded(activeGoalBeforePrompt)
@@ -1332,6 +1371,7 @@ export default {
 }
 
 export const testInternals = {
+  activeGoal,
   buildLimitWarning,
   buildContinueMessage,
   buildGoalBlock,
@@ -1339,6 +1379,7 @@ export const testInternals = {
   cleanupGoal,
   currentGoal,
   escapeGoalText,
+  totalTokensForMessage,
   extractBlockedReason,
   findLatestAssistantMessage,
   formatArgumentErrors,

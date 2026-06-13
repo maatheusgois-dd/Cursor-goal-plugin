@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.14 — 2026-06-12
+
+- **Count cached context tokens in the budget.** `totalTokensForMessage` now includes `tokens.cache.read` / `cache.write` alongside `input + output + reasoning`. On providers with prompt caching (e.g. Anthropic) most of the conversation context arrives as cache reads with a tiny `input`, so the prior estimate undercounted the context window and the token budget / wrap-up could effectively never trigger.
+- **Honor `/goal pause` issued mid-handler.** The post-await re-checks in the idle handler now use a new `activeGoal` helper that treats a `stopped` goal as inactive, so a pause sent while messages are being fetched or during the cooldown no longer lets one more auto-continue slip through. Adds a regression test.
+- **Harden `escapeGoalText` against forged opening tags.** In addition to escaping closing tags, the plugin now neutralizes opening forms of its own structural tags (`<budget_wrapup>`, `<next_step>`, `<completion_audit>`, `<goal_objective>`, `<goal_continuation>`, `<progress_budget>`), closing a prompt-injection path where goal text could mimic elevated-instruction blocks. Non-structural tag-like text (e.g. `<div>`) is left untouched.
+- **Stop the smoke test from touching real state.** `scripts/smoke-command-hook.mjs` now runs with `persistState: false`, so `npm run smoke` can no longer read or overwrite `~/.opencode-goal-plugin/state.json`.
+- Document the `warnTurnsRemaining` / `warnDurationMsRemaining` / `warnTokensRemaining` options in the README.
+
 ## 0.1.13 — 2026-06-11
 
 > Fixes a significant token-tracking bug where the reported token count could be 5–10× higher than what OpenCode displays, making budgets appear exhausted far sooner than expected.

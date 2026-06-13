@@ -23,7 +23,9 @@ const client = {
 assert.equal(pluginModule.id, "opencode-goal-plugin")
 assert.equal(pluginModule.server, GoalPlugin)
 
-const hooks = await GoalPlugin({ client }, { minDelayMs: 1 })
+// persistState:false keeps the smoke test from reading or overwriting the
+// user's real ~/.opencode-goal-plugin/state.json.
+const hooks = await GoalPlugin({ client }, { minDelayMs: 1, persistState: false })
 assert.equal(typeof hooks["command.execute.before"], "function")
 assert.equal(typeof hooks.event, "function")
 assert.equal(typeof hooks["experimental.chat.system.transform"], "function")

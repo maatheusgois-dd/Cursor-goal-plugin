@@ -70,6 +70,14 @@ Resume a paused or stopped goal:
 /goal resume
 ```
 
+Edit the active goal's objective without losing its budget or history:
+
+```
+/goal edit fix the failing tests and also update the docs
+```
+
+`/goal edit <new objective>` revises the goal in place: the turn, token, and time budget plus the lifecycle history are preserved, and any pause/blocked state is cleared so the revised goal can continue. A goal that already hit a hard limit will re-pause on the next idle — run `/goal resume` for a fresh budget window.
+
 Pause without clearing the active goal:
 
 ```
@@ -89,6 +97,7 @@ Clear the active goal:
 1. When you set a goal, the plugin stores it in session memory and injects it into the system prompt so the assistant keeps it in view on every turn.
 2. Each time the session goes idle, the plugin sends a continuation prompt containing the goal, the remaining budget, and a completion audit asking the assistant to verify the current state before declaring done.
 3. The plugin stops auto-continuing when the assistant ends a response with `[goal:complete]` or `[goal:blocked]`, or when a safety limit is reached.
+4. If OpenCode compacts the session, the plugin injects the goal objective, budget usage, and latest checkpoint into the compaction context so the goal survives the compaction and the assistant keeps the thread. While a goal is active, the plugin also disables OpenCode's generic post-compaction auto-continue so it does not race the plugin's own continuation.
 
 ## Completion markers
 

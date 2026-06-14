@@ -6,6 +6,7 @@ import test from "node:test"
 import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 
 const {
+  buildCompactionContext,
   buildContinueMessage,
   buildGoalBlock,
   buildLimitWarning,
@@ -1811,4 +1812,168 @@ test("normalizeOptions rejects budgetWrapupRatio at boundary values 0 and 1", ()
   assert.equal(normalizeOptions({ budgetWrapupRatio: 1 }).budgetWrapupRatio, defaults.budgetWrapupRatio)
   assert.equal(normalizeOptions({ budgetWrapupRatio: "high" }).budgetWrapupRatio, defaults.budgetWrapupRatio)
   assert.equal(normalizeOptions({ budgetWrapupRatio: 0.5 }).budgetWrapupRatio, 0.5)
+})
+
+test("/goal edit updates the objective in place and preserves budget", async () => {
+  const { hooks } = await createHooks({ options: { minDelayMs: 1, maxTurns: 5 } })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-edit", arguments: "ship the first thing" },
+    { parts: [] },
+  )
+
+  const goal = currentGoal("session-edit")
+  goal.turnCount = 2
+  goal.totalTokens = 1234
+
+  const editOutput = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-edit", arguments: "edit ship the better thing" },
+    editOutput,
+  )
+  assert.match(editOutput.parts[0].text, /Goal objective updated: ship the better thing/)
+
+  const updated = currentGoal("session-edit")
+  assert.equal(updated.condition, "ship the better thing")
+  // Budget and history are preserved across an edit.
+  assert.equal(updated.turnCount, 2)
+  assert.equal(updated.totalTokens, 1234)
+  assert.ok(updated.history.some((entry) => entry.type === "edited"))
+})
+
+test("/goal edit re-activates a paused goal and clears blocked state", async () => {
+  const { hooks } = await createHooks({ options: { minDelayMs: 1 } })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-edit-2", arguments: "ship it" },
+    { parts: [] },
+  )
+
+  const goal = currentGoal("session-edit-2")
+  goal.stopped = true
+  goal.stopReason = "blocked"
+  goal.blockedReason = "needs an API key"
+  goal.noProgressTurns = 3
+
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-edit-2", arguments: "edit ship it differently" },
+    { parts: [] },
+  )
+
+  const updated = currentGoal("session-edit-2")
+  assert.equal(updated.stopped, false)
+  assert.equal(updated.stopReason, "")
+  assert.equal(updated.blockedReason, "")
+  assert.equal(updated.noProgressTurns, 0)
+
+  // The edited objective is injected into the system prompt again.
+  const systemOutput = { system: [] }
+  await hooks["experimental.chat.system.transform"]({ sessionID: "session-edit-2" }, systemOutput)
+  assert.equal(systemOutput.system.length, 1)
+  assert.match(systemOutput.system[0], /ship it differently/)
+})
+
+test("/goal edit with no active goal returns help text", async () => {
+  const { hooks } = await createHooks()
+  const output = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-none", arguments: "edit something" },
+    output,
+  )
+  assert.match(output.parts[0].text, /No active goal to edit/)
+})
+
+test("/goal edit without a new objective returns help text", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-edit-3", arguments: "ship it" },
+    { parts: [] },
+  )
+  const output = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-edit-3", arguments: "edit" },
+    output,
+  )
+  assert.match(output.parts[0].text, /No new objective provided/)
+})
+
+test("session compaction preserves the active goal objective and budget", async () => {
+  const { hooks } = await createHooks({ options: { minDelayMs: 1, maxTurns: 7 } })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-compact", arguments: "migrate the database" },
+    { parts: [] },
+  )
+
+  const compactOutput = { context: [] }
+  await hooks["experimental.session.compacting"]({ sessionID: "session-compact" }, compactOutput)
+  assert.equal(compactOutput.context.length, 1)
+  assert.match(compactOutput.context[0], /migrate the database/)
+  assert.match(compactOutput.context[0], /Preserve it across compaction/)
+  assert.match(compactOutput.context[0], /Auto-continues used: 0\/7/)
+})
+
+test("session compaction is a no-op when no goal is active", async () => {
+  const { hooks } = await createHooks()
+  const compactOutput = { context: [] }
+  await hooks["experimental.session.compacting"]({ sessionID: "session-empty" }, compactOutput)
+  assert.equal(compactOutput.context.length, 0)
+})
+
+test("buildCompactionContext initializes context when output has none", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-compact-2", arguments: "do the thing" },
+    { parts: [] },
+  )
+  const compactOutput = {}
+  await hooks["experimental.session.compacting"]({ sessionID: "session-compact-2" }, compactOutput)
+  assert.ok(Array.isArray(compactOutput.context))
+  assert.equal(compactOutput.context.length, 1)
+  assert.match(compactOutput.context[0], /do the thing/)
+})
+
+test("buildCompactionContext includes the latest checkpoint when present", () => {
+  const goal = {
+    condition: "finish the audit",
+    startedAt: Date.now(),
+    turnCount: 1,
+    totalTokens: 500,
+    stopped: false,
+    options: { maxTurns: 10, maxTokens: 200000 },
+    lastCheckpoint: { summary: "wrote the parser", timestamp: Date.now() },
+  }
+  const context = buildCompactionContext(goal)
+  assert.match(context, /Latest checkpoint: wrote the parser/)
+  assert.match(context, /finish the audit/)
+})
+
+test("compaction autocontinue is disabled while a goal is active", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-ac", arguments: "keep going" },
+    { parts: [] },
+  )
+  const output = { enabled: true }
+  await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac" }, output)
+  assert.equal(output.enabled, false)
+})
+
+test("compaction autocontinue is left untouched for a paused goal", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-ac-paused", arguments: "keep going" },
+    { parts: [] },
+  )
+  const goal = currentGoal("session-ac-paused")
+  goal.stopped = true
+  goal.stopReason = "paused"
+
+  const output = { enabled: true }
+  await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac-paused" }, output)
+  assert.equal(output.enabled, true)
+})
+
+test("compaction autocontinue is a no-op when no goal is active", async () => {
+  const { hooks } = await createHooks()
+  const output = { enabled: true }
+  await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac-none" }, output)
+  assert.equal(output.enabled, true)
 })

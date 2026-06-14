@@ -1944,3 +1944,36 @@ test("buildCompactionContext includes the latest checkpoint when present", () =>
   assert.match(context, /Latest checkpoint: wrote the parser/)
   assert.match(context, /finish the audit/)
 })
+
+test("compaction autocontinue is disabled while a goal is active", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-ac", arguments: "keep going" },
+    { parts: [] },
+  )
+  const output = { enabled: true }
+  await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac" }, output)
+  assert.equal(output.enabled, false)
+})
+
+test("compaction autocontinue is left untouched for a paused goal", async () => {
+  const { hooks } = await createHooks()
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-ac-paused", arguments: "keep going" },
+    { parts: [] },
+  )
+  const goal = currentGoal("session-ac-paused")
+  goal.stopped = true
+  goal.stopReason = "paused"
+
+  const output = { enabled: true }
+  await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac-paused" }, output)
+  assert.equal(output.enabled, true)
+})
+
+test("compaction autocontinue is a no-op when no goal is active", async () => {
+  const { hooks } = await createHooks()
+  const output = { enabled: true }
+  await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac-none" }, output)
+  assert.equal(output.enabled, true)
+})

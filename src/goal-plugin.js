@@ -1433,6 +1433,17 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         output.context = [context]
       }
     },
+
+    "experimental.compaction.autocontinue": async (input, output) => {
+      // When a goal is active the plugin drives its own idle-triggered
+      // continuation, so disable OpenCode's generic post-compaction
+      // auto-continue to avoid two continuations racing after a compaction.
+      // Paused/stopped goals leave the native behavior untouched.
+      if (!input?.sessionID || !output) return
+      const goal = goalStates.get(input.sessionID)
+      if (!goal || goal.stopped) return
+      output.enabled = false
+    },
   }
 }
 

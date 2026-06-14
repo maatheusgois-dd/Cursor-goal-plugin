@@ -783,6 +783,24 @@ function buildContinueMessage(goal, { budgetWrapup = false } = {}) {
   return lines.filter(Boolean).join("\n")
 }
 
+function buildCompactionContext(goal) {
+  // Preserve the active goal across an OpenCode session compaction. Without
+  // this, a compaction can drop the goal objective and budget state from the
+  // working context, so the assistant loses the thread mid-run even though the
+  // plugin still re-injects via system.transform afterward.
+  const elapsedSeconds = Math.round((Date.now() - goal.startedAt) / 1000)
+  return [
+    "An OpenCode goal is active for this session. Preserve it across compaction.",
+    buildGoalBlock(goal),
+    `Goal status: ${goal.stopped ? goal.stopReason || "stopped" : "active"}.`,
+    `Auto-continues used: ${goal.turnCount}/${goal.options.maxTurns}. Context tokens: ${goal.totalTokens}/${goal.options.maxTokens}. Elapsed: ${elapsedSeconds}s.`,
+    goal.lastCheckpoint ? `Latest checkpoint: ${goal.lastCheckpoint.summary}` : null,
+    "After compaction, continue from the next concrete unfinished step while the goal is active. Verify the result against the goal objective before ending; output [goal:complete] only when fully satisfied, or [goal:blocked] only if user input is required.",
+  ]
+    .filter(Boolean)
+    .join("\n")
+}
+
 function extractBlockedReason(text) {
   const lines = text.trimEnd().split("\n")
   const markerIndex = lines.findIndex((line) => {
@@ -1028,6 +1046,47 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         pushHistory(goal, "resumed", "User resumed the goal with a fresh local budget window.")
         await persist()
         output.parts = [makeTextPart(`Goal resumed with fresh limits: ${goal.condition}`)]
+        return
+      }
+
+      if (args === "edit" || args.toLowerCase().startsWith("edit ")) {
+        const goal = goalStates.get(sessionID)
+        if (!goal) {
+          output.parts = [
+            makeTextPart("No active goal to edit. Set one with `/goal <condition>`."),
+          ]
+          return
+        }
+        const newObjective = stripWrappingQuotes(args.slice("edit".length).trim())
+        if (!newObjective) {
+          output.parts = [
+            makeTextPart("No new objective provided. Use `/goal edit <new objective>`."),
+          ]
+          return
+        }
+
+        goal.condition = newObjective
+        // Editing the objective revises the goal in place: keep the turn,
+        // token, and time budget plus history, but clear soft-stop state so the
+        // revised goal can continue. A goal that hit a hard limit will re-pause
+        // on the next idle (use /goal resume for a fresh budget window).
+        goal.stopped = false
+        goal.stopReason = ""
+        goal.blockedReason = ""
+        goal.budgetWrapupSent = false
+        goal.noProgressTurns = 0
+        goal.lastStatus = "Goal objective updated."
+        pushHistory(goal, "edited", `Objective updated to: ${summarizeText(newObjective, 400)}`)
+        await persist()
+        output.parts = [
+          makeTextPart(
+            [
+              `Goal objective updated: ${goal.condition}`,
+              "",
+              "Budgets and history are preserved. Run `/goal resume` for a fresh budget window, or `/goal status` to review.",
+            ].join("\n"),
+          ),
+        ]
         return
       }
 
@@ -1362,6 +1421,18 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       }
       output.system = systemBlocks
     },
+
+    "experimental.session.compacting": async (input, output) => {
+      if (!input?.sessionID || !output) return
+      const goal = goalStates.get(input.sessionID)
+      if (!goal) return
+      const context = buildCompactionContext(goal)
+      if (Array.isArray(output.context)) {
+        output.context.push(context)
+      } else {
+        output.context = [context]
+      }
+    },
   }
 }
 
@@ -1373,6 +1444,7 @@ export default {
 export const testInternals = {
   activeGoal,
   buildLimitWarning,
+  buildCompactionContext,
   buildContinueMessage,
   buildGoalBlock,
   budgetWrapupNeeded,

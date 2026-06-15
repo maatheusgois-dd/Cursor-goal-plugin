@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Add an inline `--budget <n>` flag on the `/goal` create command.** A shorthand for the context-token limit (`--max-tokens`) that accepts a plain integer or a `k`/`m` suffix, e.g. `/goal ship it --budget 100k` (= 100,000 context tokens) or `--budget=1.5m`. Invalid or non-positive values are rejected with a clear error like the other flags. New `parseTokenBudget` helper (suffix-aware) and a `tokens` flag type in the argument parser; unit and parsing tests. Implements megalist item 8.1.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

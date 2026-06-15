@@ -8,7 +8,16 @@ const STATE_FILE_VERSION = 1
 // The legacy home-dir path and the XDG state path are read as migration
 // fallbacks so existing users do not lose state when upgrading.
 const PROJECT_LOCAL_STATE_SUBPATH = join(".opencode", "goals", "state.json")
-const LEGACY_HOME_STATE_FILE_PATH = join(homedir(), ".opencode-goal-plugin", "state.json")
+// Home base for path resolution. Honors an injected `env.HOME` when present so
+// path resolution is deterministic and testable across platforms — `os.homedir()`
+// ignores `$HOME` on macOS (it reads the account record), which would otherwise
+// make the legacy fallback resolve to the real home during isolated tests.
+function homeBase(env = process.env) {
+  return typeof env?.HOME === "string" && env.HOME.trim() ? env.HOME.trim() : homedir()
+}
+function legacyHomeStateFilePath(env = process.env) {
+  return join(homeBase(env), ".opencode-goal-plugin", "state.json")
+}
 const MAX_HISTORY_ENTRIES = 20
 const MAX_CHECKPOINTS = 5
 const CHECKPOINT_CHAR_LIMIT = 280
@@ -628,7 +637,7 @@ function xdgStateFilePath(env = process.env) {
   const base =
     typeof env?.XDG_STATE_HOME === "string" && env.XDG_STATE_HOME.trim()
       ? env.XDG_STATE_HOME.trim()
-      : join(homedir(), ".local", "state")
+      : join(homeBase(env), ".local", "state")
   return join(base, "opencode-goal-plugin", "state.json")
 }
 
@@ -648,7 +657,7 @@ function resolveStateFilePath({ stateFilePath, env = process.env, cwd } = {}) {
 // has no file yet. Only used for the project-local default — an explicit option
 // or env override is taken literally with no fallback.
 function legacyStateFilePaths(env = process.env) {
-  return [LEGACY_HOME_STATE_FILE_PATH, xdgStateFilePath(env)]
+  return [legacyHomeStateFilePath(env), xdgStateFilePath(env)]
 }
 
 function normalizePersistenceOptions(options = {}, { env = process.env, cwd } = {}) {
@@ -1711,7 +1720,10 @@ function createChildSessionAuditor(client, { agent = "build" } = {}) {
 
 export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   const defaultGoalOptions = normalizeOptions(pluginOptions)
-  const persistenceOptions = normalizePersistenceOptions(pluginOptions)
+  const persistenceOptions = normalizePersistenceOptions(pluginOptions, {
+    env: pluginOptions.env,
+    cwd: pluginOptions.cwd,
+  })
   const { commandName, registerCommand } = normalizeCommandOptions(pluginOptions)
   const persist = async () => persistState(persistenceOptions, client)
 

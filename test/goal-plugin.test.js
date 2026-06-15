@@ -2270,21 +2270,18 @@ test("migrates state from a legacy XDG path to the project-local default", async
     "utf8",
   )
 
-  const prevCwd = process.cwd()
-  const prevXdg = process.env.XDG_STATE_HOME
-  const prevHome = process.env.HOME
   try {
-    // Point HOME at an empty dir so the legacy ~/.opencode-goal-plugin path is
-    // absent and resolution falls through to the XDG fixture.
-    process.env.HOME = homeDir
-    process.env.XDG_STATE_HOME = xdgDir
-    process.chdir(projDir)
+    // Inject env + cwd through plugin options rather than mutating process
+    // globals. HOME points at an empty dir so the legacy ~/.opencode-goal-plugin
+    // path is absent and resolution falls through to the XDG fixture. (Injecting
+    // avoids relying on os.homedir() honoring $HOME, which it does not on macOS.)
+    const env = { HOME: homeDir, XDG_STATE_HOME: xdgDir }
 
     const client = {
       app: { log: async () => {} },
       session: { messages: async () => ({ data: [] }), promptAsync: async () => ({}) },
     }
-    await GoalPlugin({ client }, { persistState: true, minDelayMs: 1 })
+    await GoalPlugin({ client }, { persistState: true, minDelayMs: 1, env, cwd: projDir })
 
     // The goal was recovered from the legacy XDG location...
     assert.notEqual(currentGoal("session-migrated"), null)
@@ -2294,11 +2291,6 @@ test("migrates state from a legacy XDG path to the project-local default", async
     assert.equal(migrated.goals.length, 1)
     assert.equal(migrated.goals[0].sessionID, "session-migrated")
   } finally {
-    process.chdir(prevCwd)
-    if (prevXdg === undefined) delete process.env.XDG_STATE_HOME
-    else process.env.XDG_STATE_HOME = prevXdg
-    if (prevHome === undefined) delete process.env.HOME
-    else process.env.HOME = prevHome
     await rm(projDir, { recursive: true, force: true })
     await rm(xdgDir, { recursive: true, force: true })
     await rm(homeDir, { recursive: true, force: true })

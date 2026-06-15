@@ -39,6 +39,10 @@ const DEFAULT_OPTIONS = {
 const goalStates = new Map()
 const sessionGoals = new Map()
 const sessionArchive = new Map()
+// Sessions running an ordered (sisyphus) sequence: when the focused goal
+// completes, the next live goal (in creation order) is auto-promoted to focus
+// so the sequence advances on its own.
+const sessionOrdered = new Set()
 const MAX_ARCHIVED_PER_SESSION = 10
 const lastGoalResults = new Map()
 const seenTokens = new Map()
@@ -405,6 +409,25 @@ function archiveSessionResult(sessionID, result) {
   sessionArchive.set(sessionID, list.slice(-MAX_ARCHIVED_PER_SESSION))
 }
 
+// Advance an ordered (sisyphus) sequence: focus the next live goal in creation
+// order, clearing any backgrounded state so the idle handler drives it. Returns
+// the promoted goal, or null when the sequence is exhausted (which also clears
+// the session's ordered flag).
+function promoteNextOrderedGoal(sessionID) {
+  const next = listSessionGoals(sessionID)[0]
+  if (!next) {
+    sessionOrdered.delete(sessionID)
+    return null
+  }
+  next.stopped = false
+  next.stopReason = ""
+  next.blockedReason = ""
+  next.lastStatus = "Promoted as the next ordered goal."
+  pushHistory(next, "focused", "Auto-promoted as the next goal in the ordered (sisyphus) sequence.")
+  focusGoal(sessionID, next)
+  return next
+}
+
 // Discard the currently focused goal entirely (used when it completes or is
 // replaced). Backgrounded goals for the session are left intact.
 function cleanupGoal(sessionID) {
@@ -424,6 +447,7 @@ function clearRuntimeState() {
   goalStates.clear()
   sessionGoals.clear()
   sessionArchive.clear()
+  sessionOrdered.clear()
   lastGoalResults.clear()
   seenTokens.clear()
   seenOutputTokens.clear()
@@ -879,6 +903,15 @@ async function applyParsedStateFile(raw, client) {
     }
   }
 
+  if (Array.isArray(parsed.orderedSessions)) {
+    for (const sessionID of parsed.orderedSessions) {
+      // Only honor the ordered flag for sessions that still have goals loaded.
+      if (typeof sessionID === "string" && sessionGoals.has(sessionID)) {
+        sessionOrdered.add(sessionID)
+      }
+    }
+  }
+
   return "loaded"
 }
 
@@ -984,6 +1017,7 @@ async function persistState(persistenceOptions, client) {
               lastCheckpoint: result.lastCheckpoint || null,
             })),
           })),
+          orderedSessions: [...sessionOrdered],
         },
         null,
         2,
@@ -1558,7 +1592,7 @@ function formatGoalList(sessionID) {
 
   const lines = []
   if (goals.length) {
-    lines.push(`Goals (${goals.length}):`)
+    lines.push(`Goals (${goals.length})${sessionOrdered.has(sessionID) ? " — ordered (sisyphus)" : ""}:`)
     goals.forEach((goal, index) => {
       const marker = goal.goalId === focusedId ? "focused" : goal.stopped ? "background" : "idle"
       const state = goal.stopped && goal.goalId !== focusedId ? ` — ${goal.stopReason || "stopped"}` : ""
@@ -1792,6 +1826,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       }
 
       if (CLEAR_COMMANDS.has(args)) {
+        sessionOrdered.delete(sessionID)
         cleanupGoal(sessionID)
         lastGoalResults.delete(sessionID)
         await persist()
@@ -1879,6 +1914,66 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
 
       if (args === "list") {
         output.parts = [makeTextPart(formatGoalList(sessionID))]
+        return
+      }
+
+      if (args === "sisyphus" || args.toLowerCase().startsWith("sisyphus ")) {
+        const rest = args.slice("sisyphus".length).trim()
+        const objectives = rest
+          .split(/\n|;/)
+          .map((part) => stripWrappingQuotes(part.trim()))
+          .filter(Boolean)
+        if (!objectives.length) {
+          output.parts = [
+            makeTextPart(
+              "No objectives provided. Use `/goal sisyphus <objective 1>; <objective 2>; …` (separate with `;` or newlines).",
+            ),
+          ]
+          return
+        }
+
+        // Replace any existing live goals for this session with the ordered set.
+        for (const existing of listSessionGoals(sessionID)) {
+          for (const messageID of existing.messageIDs) {
+            seenTokens.delete(messageID)
+            seenOutputTokens.delete(messageID)
+          }
+        }
+        sessionGoals.delete(sessionID)
+        goalStates.delete(sessionID)
+        activeContinues.delete(sessionID)
+        lastGoalResults.delete(sessionID)
+
+        let firstGoal = null
+        objectives.forEach((objective, index) => {
+          const created = buildGoalState(sessionID, objective, { ...defaultGoalOptions })
+          if (index === 0) {
+            firstGoal = created
+          } else {
+            created.stopped = true
+            created.stopReason = "queued"
+          }
+          pushHistory(
+            created,
+            "set",
+            `Ordered goal ${index + 1}/${objectives.length} created (sisyphus sequence).`,
+          )
+          registerSessionGoal(created)
+        })
+        focusGoal(sessionID, firstGoal)
+        sessionOrdered.add(sessionID)
+        await persist()
+        output.parts = [
+          makeTextPart(
+            [
+              `Started an ordered sequence of ${objectives.length} goal(s) (sisyphus mode):`,
+              ...objectives.map((objective, index) => `${index + 1}. ${objective}`),
+              "",
+              `Focused goal 1: ${firstGoal.condition}`,
+              "Each goal runs to completion, then the next is auto-focused. Run `/goal list` to track progress.",
+            ].join("\n"),
+          ),
+        ]
         return
       }
 
@@ -2180,6 +2275,11 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             )
             rememberGoalResult(sessionID, activeGoalAfterMessages, "achieved", "", evidence)
             cleanupGoal(sessionID)
+            // Ordered (sisyphus) sequence: auto-promote the next goal so the
+            // session keeps working through the sequence without manual /goal focus.
+            if (sessionOrdered.has(sessionID)) {
+              promoteNextOrderedGoal(sessionID)
+            }
             await persistTerminalState("completion")
             await announceAudit(sessionID, "Audit result: completion accepted — goal archived as achieved.")
             return
@@ -2492,6 +2592,7 @@ export const testInternals = {
   buildAuditPrompt,
   parseAuditVerdict,
   createChildSessionAuditor,
+  promoteNextOrderedGoal,
   buildLimitWarning,
   buildCompactionContext,
   buildCompactionProgressSummary,

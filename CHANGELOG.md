@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Add an optional separate completion auditor that verifies before archival.** When a completion auditor is configured, a `[goal:complete]` is verified before the goal is archived: on approval it archives as achieved, on rejection the goal is *restored* (paused with stop reason `audit rejected` and the reason surfaced) rather than archived. Enable the built-in auditor — which spawns an independent OpenCode child session that replies `[audit:approved]`/`[audit:rejected]` — with `completionAudit: true`, or supply a custom `auditor({ goal, sessionID, latestText }) => { approved, reason }` (takes precedence). The built-in child-session auditor fails open if the session API is unavailable; a custom auditor that throws is treated as a rejection (fail closed). New `parseAuditVerdict` / `buildAuditPrompt` / `createChildSessionAuditor` helpers with verdict-parsing, orchestration (approve/reject/throw), and child-session-wiring tests. Off by default (no behavior change). Implements megalist item 2.2.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

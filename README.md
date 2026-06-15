@@ -202,6 +202,15 @@ Additional plugin-level options:
 - `resultRetentionMs` — how long a completed goal summary remains available through `/goal status` after the goal leaves active memory.
 - `maxStoredResults` — maximum number of completed-goal summaries retained in process memory before the oldest ones are evicted.
 
+## Completion auditor (optional)
+
+By default a `[goal:complete]` is accepted on the assistant's word. You can require an independent audit before a goal is archived:
+
+- `completionAudit: true` — the plugin spawns an independent OpenCode child session to verify the completion against the goal and workspace. The auditor replies with `[audit:approved]` or `[audit:rejected]` (with a reason).
+- `auditor: async ({ goal, sessionID, latestText }) => ({ approved, reason })` — supply your own auditor function (takes precedence over `completionAudit`).
+
+On **approval** the goal is archived as achieved. On **rejection** the goal is *not* archived — it is paused with stop reason `audit rejected` and the reason in its status, so you can address the gap and `/goal resume`. The built-in child-session auditor fails *open* (auto-approves) if the session API is unavailable, while a custom auditor that throws is treated as a rejection (fail closed). The audit is off unless one of these options is set.
+
 ## Prompt safety
 
 The goal text is wrapped in `<goal_objective>` tags and labeled as user-provided task data. The assistant is told to treat it as a task description, not as elevated instructions that can override system, developer, tool, or repository policies.

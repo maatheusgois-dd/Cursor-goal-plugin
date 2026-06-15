@@ -19,6 +19,7 @@ const {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  normalizeCommandOptions,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
@@ -113,6 +114,59 @@ test("supports equals-style per-goal flags", () => {
   assert.equal(parsed.options.noProgressTokenThreshold, 12)
   assert.equal(parsed.options.noProgressTurnsBeforePause, 4)
   assert.deepEqual(parsed.errors, [])
+})
+
+test("normalizeCommandOptions defaults and overrides", () => {
+  assert.deepEqual(normalizeCommandOptions(), { commandName: "goal", registerCommand: true })
+  assert.deepEqual(normalizeCommandOptions({ commandName: "objective" }), {
+    commandName: "objective",
+    registerCommand: true,
+  })
+  // A leading slash is tolerated and stripped.
+  assert.deepEqual(normalizeCommandOptions({ commandName: "/objective" }), {
+    commandName: "objective",
+    registerCommand: true,
+  })
+  // Blank command name falls back to the default.
+  assert.equal(normalizeCommandOptions({ commandName: "   " }).commandName, "goal")
+  assert.equal(normalizeCommandOptions({ registerCommand: false }).registerCommand, false)
+})
+
+test("commandName option makes the plugin own a different slash command", async () => {
+  const { hooks } = await createHooks({ options: { commandName: "objective" } })
+
+  // The default `goal` command is ignored when a different name is configured.
+  const ignored = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "cmd-s1", arguments: "ship it" },
+    ignored,
+  )
+  assert.equal(ignored.parts.length, 0)
+  assert.equal(currentGoal("cmd-s1"), null)
+
+  // The configured command name is handled.
+  const handled = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "objective", sessionID: "cmd-s1", arguments: "ship it" },
+    handled,
+  )
+  assert.match(handled.parts[0].text, /New active goal: ship it/)
+  assert.notEqual(currentGoal("cmd-s1"), null)
+
+  // User-facing hints reference the configured command name.
+  const status = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "objective", sessionID: "cmd-s2", arguments: "status" },
+    status,
+  )
+  assert.match(status.parts[0].text, /\/objective <condition>/)
+})
+
+test("registerCommand:false omits the command hook entirely", async () => {
+  const { hooks } = await createHooks({ options: { registerCommand: false } })
+  assert.equal(hooks["command.execute.before"], undefined)
+  assert.equal(typeof hooks.event, "function")
+  assert.equal(typeof hooks["experimental.chat.system.transform"], "function")
 })
 
 test("rejects unsupported or malformed flags with explicit errors", () => {

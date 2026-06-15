@@ -130,7 +130,7 @@ function recordCheckpoint(goal, text, timestamp = Date.now()) {
   goal.checkpoints = [...(goal.checkpoints || []), checkpoint].slice(-MAX_CHECKPOINTS)
 }
 
-function formatStatus(goal) {
+function formatStatus(goal, commandName = "goal") {
   const elapsed = Math.round((Date.now() - goal.startedAt) / 1000)
   const lastProgress =
     goal.lastProgressAt > 0
@@ -153,7 +153,7 @@ function formatStatus(goal) {
   if (goal.blockedReason) lines.push(`Blocked reason: ${goal.blockedReason}`)
   if (goal.stopped) {
     lines.push(
-      `Suggested action: ${goal.stopReason === "blocked" ? "address the blocker, then run /goal resume" : "run /goal resume to continue, or /goal clear to discard"}`,
+      `Suggested action: ${goal.stopReason === "blocked" ? `address the blocker, then run /${commandName} resume` : `run /${commandName} resume to continue, or /${commandName} clear to discard`}`,
     )
   }
   return lines.join("\n")
@@ -373,6 +373,21 @@ function normalizePersistenceOptions(options = {}) {
   }
 }
 
+// Command surface options (item 8.2): `commandName` lets the plugin own a
+// different slash command (e.g. /objective) and `registerCommand: false` makes
+// the plugin skip the command hook entirely (agent/programmatic use only). A
+// leading slash in commandName is tolerated and stripped.
+function normalizeCommandOptions(options = {}) {
+  const raw =
+    typeof options.commandName === "string" && options.commandName.trim()
+      ? options.commandName.trim().replace(/^\/+/, "").trim()
+      : ""
+  return {
+    commandName: raw || "goal",
+    registerCommand: options.registerCommand !== false,
+  }
+}
+
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
@@ -498,7 +513,7 @@ function deserializeGoal(goal) {
   if (!hydrated.stopped) {
     hydrated.stopped = true
     hydrated.stopReason = "recovered after restart"
-    hydrated.lastStatus = "Recovered persisted goal state. Review /goal status and run /goal resume when ready."
+    hydrated.lastStatus = "Recovered persisted goal state. Review the goal status and resume it when ready."
     pushHistory(
       hydrated,
       "recovered",
@@ -945,6 +960,7 @@ function budgetWrapupNeeded(goal) {
 export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   const defaultGoalOptions = normalizeOptions(pluginOptions)
   const persistenceOptions = normalizePersistenceOptions(pluginOptions)
+  const { commandName, registerCommand } = normalizeCommandOptions(pluginOptions)
   const persist = async () => persistState(persistenceOptions, client)
 
   clearRuntimeState()
@@ -954,9 +970,9 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
     await persist()
   }
 
-  return {
+  const hooks = {
     "command.execute.before": async (input, output) => {
-      if (input.command !== "goal") return
+      if (input.command !== commandName) return
 
       const args = (input.arguments || "").trim()
       const sessionID = input.sessionID
@@ -968,10 +984,10 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         output.parts = [
           makeTextPart(
             goal
-              ? formatStatus(goal)
+              ? formatStatus(goal, commandName)
               : lastResult
                 ? formatGoalResult(lastResult)
-                : "No active goal. Set one with `/goal <condition>`.",
+                : `No active goal. Set one with \`/${commandName} <condition>\`.`,
           ),
         ]
         return
@@ -998,7 +1014,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
                     "",
                     formatHistory(lastResult.history),
                   ].join("\n")
-                : "No goal history recorded yet. Set a goal with `/goal <condition>`.",
+                : `No goal history recorded yet. Set a goal with \`/${commandName} <condition>\`.`,
           ),
         ]
         return
@@ -1015,7 +1031,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       if (PAUSE_COMMANDS.has(args)) {
         const goal = goalStates.get(sessionID)
         if (!goal) {
-          output.parts = [makeTextPart("No active goal. Set one with `/goal <condition>`.")]
+          output.parts = [makeTextPart(`No active goal. Set one with \`/${commandName} <condition>\`.`)]
           return
         }
         goal.stopped = true
@@ -1030,7 +1046,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       if (args === "resume") {
         const goal = goalStates.get(sessionID)
         if (!goal) {
-          output.parts = [makeTextPart("No active goal. Set one with `/goal <condition>`.")]
+          output.parts = [makeTextPart(`No active goal. Set one with \`/${commandName} <condition>\`.`)]
           return
         }
         if (!goal.stopped) {
@@ -1053,14 +1069,14 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         const goal = goalStates.get(sessionID)
         if (!goal) {
           output.parts = [
-            makeTextPart("No active goal to edit. Set one with `/goal <condition>`."),
+            makeTextPart(`No active goal to edit. Set one with \`/${commandName} <condition>\`.`),
           ]
           return
         }
         const newObjective = stripWrappingQuotes(args.slice("edit".length).trim())
         if (!newObjective) {
           output.parts = [
-            makeTextPart("No new objective provided. Use `/goal edit <new objective>`."),
+            makeTextPart(`No new objective provided. Use \`/${commandName} edit <new objective>\`.`),
           ]
           return
         }
@@ -1083,7 +1099,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             [
               `Goal objective updated: ${goal.condition}`,
               "",
-              "Budgets and history are preserved. Run `/goal resume` for a fresh budget window, or `/goal status` to review.",
+              `Budgets and history are preserved. Run \`/${commandName} resume\` for a fresh budget window, or \`/${commandName} status\` to review.`,
             ].join("\n"),
           ),
         ]
@@ -1096,7 +1112,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         return
       }
       if (!parsed.condition) {
-        output.parts = [makeTextPart("No goal provided. Set one with `/goal <condition>`.")]
+        output.parts = [makeTextPart(`No goal provided. Set one with \`/${commandName} <condition>\`.`)]
         return
       }
 
@@ -1143,7 +1159,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             "Start working toward this goal now.",
             "When the goal is fully satisfied, end your response with `[goal:complete]`.",
             "If you are truly blocked and need the user, end with `[goal:blocked]`.",
-            "Use `/goal history` to inspect recent lifecycle events and checkpoints.",
+            `Use \`/${commandName} history\` to inspect recent lifecycle events and checkpoints.`,
             "",
             `Limits: ${goal.options.maxTurns} auto-continues, ${Math.round(
               goal.options.maxDurationMs / 1000,
@@ -1287,7 +1303,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           ) {
             activeGoalAfterMessages.stopped = true
             activeGoalAfterMessages.stopReason = "no progress"
-            activeGoalAfterMessages.lastStatus = `Goal auto-continue paused after ${activeGoalAfterMessages.noProgressTurns} low-progress turn(s); the latest turn produced ${latestOutputTokens} output token(s). Run /goal resume to continue.`
+            activeGoalAfterMessages.lastStatus = `Goal auto-continue paused after ${activeGoalAfterMessages.noProgressTurns} low-progress turn(s); the latest turn produced ${latestOutputTokens} output token(s). Run /${commandName} resume to continue.`
             pushHistory(
               activeGoalAfterMessages,
               "paused",
@@ -1353,7 +1369,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             if (activeGoalAfterPrompt.promptFailures >= activeGoalAfterPrompt.options.maxPromptFailures) {
               activeGoalAfterPrompt.stopped = true
               activeGoalAfterPrompt.stopReason = "auto-continue failures"
-              activeGoalAfterPrompt.lastStatus = `${message}; paused after ${activeGoalAfterPrompt.promptFailures} failure(s). Run /goal resume to retry.`
+              activeGoalAfterPrompt.lastStatus = `${message}; paused after ${activeGoalAfterPrompt.promptFailures} failure(s). Run /${commandName} resume to retry.`
             }
           }
           await logPluginError(client, message, response.error)
@@ -1381,7 +1397,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           if (activeGoalAfterError.promptFailures >= activeGoalAfterError.options.maxPromptFailures) {
             activeGoalAfterError.stopped = true
             activeGoalAfterError.stopReason = "auto-continue failures"
-            activeGoalAfterError.lastStatus = `${message}; paused after ${activeGoalAfterError.promptFailures} failure(s). Run /goal resume to retry.`
+            activeGoalAfterError.lastStatus = `${message}; paused after ${activeGoalAfterError.promptFailures} failure(s). Run /${commandName} resume to retry.`
           }
           await persist()
         }
@@ -1445,6 +1461,14 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       output.enabled = false
     },
   }
+
+  // register_command toggle (item 8.2): when disabled, the plugin does not own
+  // a slash command and only the event/transform/compaction hooks remain.
+  if (!registerCommand) {
+    delete hooks["command.execute.before"]
+  }
+
+  return hooks
 }
 
 export default {
@@ -1471,6 +1495,7 @@ export const testInternals = {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  normalizeCommandOptions,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,

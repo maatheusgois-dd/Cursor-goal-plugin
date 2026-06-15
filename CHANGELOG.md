@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Make the slash command configurable (`commandName`) and optional (`registerCommand`).** A new `commandName` plugin option (default `goal`, leading slash tolerated) lets the plugin own a different command such as `/objective`; the command hook matches that name and every user-facing hint (`/<name> status`, `/<name> resume`, etc.) follows it. A new `registerCommand: false` option makes the plugin skip installing the `command.execute.before` hook entirely, for setups that drive the goal workflow programmatically without owning a slash command. New `normalizeCommandOptions` helper; unit and command-hook tests. Implements megalist item 8.2.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

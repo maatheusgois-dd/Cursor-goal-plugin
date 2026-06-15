@@ -100,6 +100,18 @@ Clear the active goal:
 
 `/goal stop`, `/goal off`, `/goal reset`, `/goal none`, and `/goal cancel` are aliases for `/goal clear`.
 
+### Multiple goals
+
+A session can hold more than one goal. `/goal <condition>` replaces the focused goal, while `/goal add <condition>` keeps the current goal (backgrounding it) and focuses a new one. Only the **focused** goal is auto-continued; backgrounded goals are paused until you focus them.
+
+```
+/goal add write the migration guide
+/goal list
+/goal focus 1
+```
+
+`/goal list` shows the numbered live goals (which is focused, which are backgrounded) and a per-session archive of completed/cleared goals so they stay readable. `/goal focus <number>` switches the active goal, backgrounding the previous one. Focus is tracked per session and survives a restart.
+
 ## How it works
 
 1. When you set a goal, the plugin stores it in session memory and injects it into the system prompt so the assistant keeps it in view on every turn.

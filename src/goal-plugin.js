@@ -30,7 +30,15 @@ const DEFAULT_OPTIONS = {
   maxStoredResults: 200,
 }
 
+// `goalStates` maps a session to its FOCUSED goal — the single goal the idle
+// handler drives and that the system-prompt transform injects. `sessionGoals`
+// is the full registry of live goals per session (focused + backgrounded);
+// the focused goal is the same object reference held in both. `sessionArchive`
+// keeps a capped list of completed/cleared goals so they stay readable.
 const goalStates = new Map()
+const sessionGoals = new Map()
+const sessionArchive = new Map()
+const MAX_ARCHIVED_PER_SESSION = 10
 const lastGoalResults = new Map()
 const seenTokens = new Map()
 const seenOutputTokens = new Map()
@@ -233,6 +241,43 @@ function stopReason(goal) {
   return null
 }
 
+function sessionGoalMap(sessionID) {
+  let map = sessionGoals.get(sessionID)
+  if (!map) {
+    map = new Map()
+    sessionGoals.set(sessionID, map)
+  }
+  return map
+}
+
+function registerSessionGoal(goal) {
+  sessionGoalMap(goal.sessionID).set(goal.goalId, goal)
+}
+
+function listSessionGoals(sessionID) {
+  const map = sessionGoals.get(sessionID)
+  return map ? [...map.values()] : []
+}
+
+function removeSessionGoal(sessionID, goalId) {
+  const map = sessionGoals.get(sessionID)
+  if (!map) return
+  map.delete(goalId)
+  if (map.size === 0) sessionGoals.delete(sessionID)
+}
+
+function focusGoal(sessionID, goal) {
+  goalStates.set(sessionID, goal)
+}
+
+function archiveSessionResult(sessionID, result) {
+  const list = sessionArchive.get(sessionID) || []
+  list.push(result)
+  sessionArchive.set(sessionID, list.slice(-MAX_ARCHIVED_PER_SESSION))
+}
+
+// Discard the currently focused goal entirely (used when it completes or is
+// replaced). Backgrounded goals for the session are left intact.
 function cleanupGoal(sessionID) {
   const goal = goalStates.get(sessionID)
   if (goal) {
@@ -240,6 +285,7 @@ function cleanupGoal(sessionID) {
       seenTokens.delete(messageID)
       seenOutputTokens.delete(messageID)
     }
+    removeSessionGoal(sessionID, goal.goalId)
   }
   goalStates.delete(sessionID)
   activeContinues.delete(sessionID)
@@ -247,6 +293,8 @@ function cleanupGoal(sessionID) {
 
 function clearRuntimeState() {
   goalStates.clear()
+  sessionGoals.clear()
+  sessionArchive.clear()
   lastGoalResults.clear()
   seenTokens.clear()
   seenOutputTokens.clear()
@@ -272,8 +320,7 @@ function pruneGoalResults(options) {
 }
 
 function rememberGoalResult(sessionID, goal, state, reason = "") {
-  lastGoalResults.delete(sessionID)
-  lastGoalResults.set(sessionID, {
+  const result = {
     condition: goal.condition,
     state,
     reason,
@@ -286,7 +333,11 @@ function rememberGoalResult(sessionID, goal, state, reason = "") {
     lastCheckpoint: goal.lastCheckpoint || null,
     checkpoints: [...(goal.checkpoints || [])],
     history: [...(goal.history || [])],
-  })
+  }
+  lastGoalResults.delete(sessionID)
+  lastGoalResults.set(sessionID, result)
+  // Keep a per-session archive so completed goals stay readable via /goal list.
+  archiveSessionResult(sessionID, { ...result })
   pruneGoalResults(goal.options)
 }
 
@@ -626,7 +677,7 @@ async function applyParsedStateFile(raw, client) {
   for (const rawGoal of parsed.goals) {
     const normalizedGoal = normalizePersistedGoal(rawGoal)
     if (normalizedGoal) {
-      loadedGoals.push(normalizedGoal)
+      loadedGoals.push({ goal: normalizedGoal, focused: rawGoal?.focused === true })
     } else {
       skippedGoals += 1
     }
@@ -652,12 +703,35 @@ async function applyParsedStateFile(raw, client) {
 
   clearRuntimeState()
 
-  for (const goal of loadedGoals) {
-    goalStates.set(goal.sessionID, deserializeGoal(goal))
+  const focusBySession = new Map()
+  for (const { goal, focused } of loadedGoals) {
+    const hydrated = deserializeGoal(goal)
+    registerSessionGoal(hydrated)
+    if (focused && !focusBySession.has(hydrated.sessionID)) {
+      focusBySession.set(hydrated.sessionID, hydrated)
+    }
+  }
+  // Restore focus. Older single-goal state files have no `focused` flag, so
+  // fall back to focusing a session's first (typically only) goal.
+  for (const [sessionID, goalMap] of sessionGoals.entries()) {
+    const focusTarget = focusBySession.get(sessionID) || goalMap.values().next().value
+    if (focusTarget) focusGoal(sessionID, focusTarget)
   }
 
   for (const result of loadedResults) {
     lastGoalResults.set(result.sessionID, result)
+  }
+
+  if (Array.isArray(parsed.archives)) {
+    for (const entry of parsed.archives) {
+      if (!isPlainObject(entry) || typeof entry.sessionID !== "string" || !entry.sessionID) continue
+      const results = Array.isArray(entry.results)
+        ? entry.results.map(normalizePersistedResult).filter(Boolean)
+        : []
+      if (results.length) {
+        sessionArchive.set(entry.sessionID, results.slice(-MAX_ARCHIVED_PER_SESSION))
+      }
+    }
   }
 
   return "loaded"
@@ -713,13 +787,29 @@ async function persistState(persistenceOptions, client) {
       JSON.stringify(
         {
           version: STATE_FILE_VERSION,
-          goals: [...goalStates.values()].map(serializeGoal),
+          // All live goals across sessions, each flagged whether it is the
+          // session's focused goal so focus survives a restart.
+          goals: [...sessionGoals.values()]
+            .flatMap((map) => [...map.values()])
+            .map((goal) => ({
+              ...serializeGoal(goal),
+              focused: goalStates.get(goal.sessionID)?.goalId === goal.goalId,
+            })),
           results: [...lastGoalResults.entries()].map(([sessionID, result]) => ({
             ...result,
             sessionID,
             history: [...(result.history || [])],
             checkpoints: [...(result.checkpoints || [])],
             lastCheckpoint: result.lastCheckpoint || null,
+          })),
+          archives: [...sessionArchive.entries()].map(([sessionID, results]) => ({
+            sessionID,
+            results: results.map((result) => ({
+              ...result,
+              history: [...(result.history || [])],
+              checkpoints: [...(result.checkpoints || [])],
+              lastCheckpoint: result.lastCheckpoint || null,
+            })),
           })),
         },
         null,
@@ -1157,6 +1247,68 @@ function budgetWrapupNeeded(goal) {
   )
 }
 
+function buildGoalState(sessionID, condition, options, meta = {}, lastStatus = "Goal set.") {
+  return {
+    goalId: randomUUID(),
+    condition,
+    successCriteria: typeof meta.successCriteria === "string" ? meta.successCriteria : "",
+    constraints: typeof meta.constraints === "string" ? meta.constraints : "",
+    mode: normalizeMode(meta.mode) || "normal",
+    sessionID,
+    turnCount: 0,
+    startedAt: Date.now(),
+    totalTokens: 0,
+    options,
+    lastStatus,
+    lastAssistantText: "",
+    lastAssistantMessageID: "",
+    lastContinueAt: 0,
+    lastProgressAt: 0,
+    noProgressTurns: 0,
+    blockedReason: "",
+    budgetWrapupSent: false,
+    stopped: false,
+    stopReason: "",
+    promptFailures: 0,
+    messageIDs: new Set(),
+    history: [],
+    checkpoints: [],
+    lastCheckpoint: null,
+  }
+}
+
+function formatGoalList(sessionID) {
+  const goals = listSessionGoals(sessionID)
+  const focusedId = goalStates.get(sessionID)?.goalId || null
+  const archived = sessionArchive.get(sessionID) || []
+
+  if (!goals.length && !archived.length) {
+    return "No goals yet. Set one with `/goal <condition>`, or add more with `/goal add <condition>`."
+  }
+
+  const lines = []
+  if (goals.length) {
+    lines.push(`Goals (${goals.length}):`)
+    goals.forEach((goal, index) => {
+      const marker = goal.goalId === focusedId ? "focused" : goal.stopped ? "background" : "idle"
+      const state = goal.stopped && goal.goalId !== focusedId ? ` — ${goal.stopReason || "stopped"}` : ""
+      lines.push(`${index + 1}. [${marker}] ${goal.condition}${state}`)
+    })
+    lines.push("Switch with `/goal focus <number>`.")
+  } else {
+    lines.push("No active goals.")
+  }
+
+  if (archived.length) {
+    lines.push("", `Archived (${archived.length}, newest last):`)
+    archived.forEach((result) => {
+      lines.push(`- [${result.state}] ${result.condition}`)
+    })
+  }
+
+  return lines.join("\n")
+}
+
 export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   const defaultGoalOptions = normalizeOptions(pluginOptions)
   const persistenceOptions = normalizePersistenceOptions(pluginOptions)
@@ -1312,43 +1464,124 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         return
       }
 
-      const parsed = parseGoalArguments(args, defaultGoalOptions)
+      if (args === "list") {
+        output.parts = [makeTextPart(formatGoalList(sessionID))]
+        return
+      }
+
+      if (args === "focus" || args.toLowerCase().startsWith("focus ")) {
+        const ref = args.slice("focus".length).trim()
+        const goals = listSessionGoals(sessionID)
+        if (!goals.length) {
+          output.parts = [makeTextPart("No goals to focus. Set one with `/goal <condition>`.")]
+          return
+        }
+        if (!ref) {
+          output.parts = [makeTextPart(["Specify which goal to focus:", "", formatGoalList(sessionID)].join("\n"))]
+          return
+        }
+        // A purely numeric ref is a 1-based index only — never a goalId prefix,
+        // so an out-of-range number like "9" can't spuriously match a UUID that
+        // happens to start with that digit.
+        let target
+        if (/^\d+$/.test(ref)) {
+          const index = Number.parseInt(ref, 10)
+          target = index >= 1 && index <= goals.length ? goals[index - 1] : undefined
+        } else {
+          target = goals.find((goal) => goal.goalId === ref || goal.goalId.startsWith(ref))
+        }
+        if (!target) {
+          output.parts = [makeTextPart(`No goal matches "${ref}". Run \`/goal list\` to see the numbered goals.`)]
+          return
+        }
+
+        const current = goalStates.get(sessionID)
+        if (current && current.goalId === target.goalId) {
+          output.parts = [makeTextPart(`Goal already focused: ${target.condition}`)]
+          return
+        }
+        if (current) {
+          current.stopped = true
+          current.stopReason = "backgrounded"
+          pushHistory(current, "backgrounded", "Backgrounded when focus switched to another goal.")
+        }
+        target.stopped = false
+        target.stopReason = ""
+        target.blockedReason = ""
+        target.lastStatus = "Goal focused."
+        pushHistory(target, "focused", "Brought into focus as the session's active goal.")
+        focusGoal(sessionID, target)
+        await persist()
+        output.parts = [
+          makeTextPart(
+            [
+              `Focused goal: ${target.condition}`,
+              current ? `Backgrounded: ${current.condition}` : null,
+              "",
+              "Run `/goal list` to see all goals, or `/goal status` for details.",
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
+          ),
+        ]
+        return
+      }
+
+      const isAdd = args === "add" || args.toLowerCase().startsWith("add ")
+      const createArgs = isAdd ? args.slice("add".length).trim() : args
+
+      const parsed = parseGoalArguments(createArgs, defaultGoalOptions)
       if (parsed.errors.length > 0) {
         output.parts = [makeTextPart(formatArgumentErrors(parsed.errors))]
         return
       }
       if (!parsed.condition) {
-        output.parts = [makeTextPart(`No goal provided. Set one with \`/${commandName} <condition>\`.`)]
+        output.parts = [
+          makeTextPart(
+            isAdd
+              ? `No objective provided. Use \`/${commandName} add <condition>\`.`
+              : `No goal provided. Set one with \`/${commandName} <condition>\`.`,
+          ),
+        ]
         return
       }
 
-      const goal = {
-        goalId: randomUUID(),
-        condition: parsed.condition,
-        successCriteria: parsed.meta.successCriteria,
-        constraints: parsed.meta.constraints,
-        mode: parsed.meta.mode,
-        sessionID,
-        turnCount: 0,
-        startedAt: Date.now(),
-        totalTokens: 0,
-        options: parsed.options,
-        lastStatus: "Goal set.",
-        lastAssistantText: "",
-        lastAssistantMessageID: "",
-        lastContinueAt: 0,
-        lastProgressAt: 0,
-        noProgressTurns: 0,
-        blockedReason: "",
-        budgetWrapupSent: false,
-        stopped: false,
-        stopReason: "",
-        promptFailures: 0,
-        messageIDs: new Set(),
-        history: [],
-        checkpoints: [],
-        lastCheckpoint: null,
+      if (isAdd) {
+        // Keep the current goal (background it) and focus a new one.
+        const current = goalStates.get(sessionID)
+        if (current) {
+          current.stopped = true
+          current.stopReason = "backgrounded"
+          pushHistory(current, "backgrounded", "Backgrounded when a new goal was added.")
+        }
+        const added = buildGoalState(sessionID, parsed.condition, parsed.options, parsed.meta)
+        pushHistory(
+          added,
+          "set",
+          `Goal added with limits: ${added.options.maxTurns} auto-continues, ${Math.round(added.options.maxDurationMs / 1000)}s, ${added.options.maxTokens.toLocaleString()} context tokens.`,
+        )
+        registerSessionGoal(added)
+        focusGoal(sessionID, added)
+        await persist()
+        const total = listSessionGoals(sessionID).length
+        output.parts = [
+          makeTextPart(
+            [
+              `Added and focused new goal: ${added.condition}`,
+              added.successCriteria ? `Success criteria: ${added.successCriteria}` : null,
+              added.constraints ? `Constraints / non-goals: ${added.constraints}` : null,
+              added.mode !== "normal" ? `Mode: ${added.mode}` : null,
+              current ? `Backgrounded previous goal: ${current.condition}` : null,
+              `${total} goal(s) now active in this session. Run \`/${commandName} list\` to see them.`,
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
+          ),
+        ]
+        return
       }
+
+      const goal = buildGoalState(sessionID, parsed.condition, parsed.options, parsed.meta)
 
       pushHistory(
         goal,
@@ -1356,9 +1589,13 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         `Goal created with limits: ${goal.options.maxTurns} auto-continues, ${Math.round(goal.options.maxDurationMs / 1000)}s, ${goal.options.maxTokens.toLocaleString()} context tokens.`,
       )
 
+      // Replace the focused goal (cleanupGoal discards it); backgrounded goals
+      // for this session are preserved. Use `/goal add` to keep the current
+      // goal and add another.
       cleanupGoal(sessionID)
       lastGoalResults.delete(sessionID)
-      goalStates.set(sessionID, goal)
+      registerSessionGoal(goal)
+      focusGoal(sessionID, goal)
       await persist()
       output.parts = [
         makeTextPart(
@@ -1692,6 +1929,8 @@ export default {
 
 export const testInternals = {
   activeGoal,
+  listSessionGoals,
+  formatGoalList,
   buildLimitWarning,
   buildCompactionContext,
   buildCompactionProgressSummary,

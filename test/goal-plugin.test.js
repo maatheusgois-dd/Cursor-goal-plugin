@@ -22,6 +22,7 @@ const {
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
+  parseTokenBudget,
   stopReason,
   totalTokensForMessage,
 } = testInternals
@@ -113,6 +114,42 @@ test("supports equals-style per-goal flags", () => {
   assert.equal(parsed.options.noProgressTokenThreshold, 12)
   assert.equal(parsed.options.noProgressTurnsBeforePause, 4)
   assert.deepEqual(parsed.errors, [])
+})
+
+test("parseTokenBudget understands plain numbers and k/m suffixes", () => {
+  assert.equal(parseTokenBudget("200000"), 200000)
+  assert.equal(parseTokenBudget("100k"), 100000)
+  assert.equal(parseTokenBudget("100K"), 100000)
+  assert.equal(parseTokenBudget("1.5m"), 1500000)
+  assert.equal(parseTokenBudget("1M"), 1000000)
+  assert.equal(parseTokenBudget("0"), null)
+  assert.equal(parseTokenBudget("-5"), null)
+  assert.equal(parseTokenBudget("abc"), null)
+  assert.equal(parseTokenBudget("100g"), null)
+  assert.equal(parseTokenBudget(""), null)
+})
+
+test("--budget sets the context token limit and accepts a k/m suffix", () => {
+  const parsed = parseGoalArguments("ship it --budget 100k", normalizeOptions())
+  assert.equal(parsed.condition, "ship it")
+  assert.equal(parsed.options.maxTokens, 100000)
+  assert.deepEqual(parsed.errors, [])
+
+  const equalsForm = parseGoalArguments("ship it --budget=1.5m", normalizeOptions())
+  assert.equal(equalsForm.options.maxTokens, 1500000)
+
+  const plain = parseGoalArguments("ship it --budget 250000", normalizeOptions())
+  assert.equal(plain.options.maxTokens, 250000)
+})
+
+test("--budget rejects a non-positive or malformed value", () => {
+  const parsed = parseGoalArguments("ship it --budget nope", normalizeOptions())
+  assert.equal(parsed.condition, "ship it")
+  assert.deepEqual(parsed.errors, [
+    "Invalid token budget for --budget: nope (use a positive number, optionally with a k or m suffix)",
+  ])
+  // Falls back to the default budget when the flag errors.
+  assert.equal(parsed.options.maxTokens, normalizeOptions().maxTokens)
 })
 
 test("rejects unsupported or malformed flags with explicit errors", () => {

@@ -65,6 +65,9 @@ const GOAL_FLAG_SPECS = {
     parse: (value, options) =>
       toPositiveInteger(value, options.noProgressTurnsBeforePause),
   },
+  // Inline budget shorthand for the context-token limit. Accepts a plain
+  // integer or a k/m suffix (e.g. --budget 100k == --max-tokens 100000).
+  "--budget": { type: "tokens", optionKey: "maxTokens" },
 }
 
 function getText(parts) {
@@ -303,6 +306,20 @@ function toPositiveInteger(value, fallback) {
 function parsePositiveIntegerStrict(value) {
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+// Parse a token budget that may use a `k` (×1000) or `m` (×1,000,000) suffix,
+// e.g. "100k" -> 100000, "1.5m" -> 1500000, "200000" -> 200000. Returns a
+// positive safe integer or null when the value is not a positive number.
+function parseTokenBudget(value) {
+  const raw = String(value).trim().toLowerCase()
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*([km])?$/)
+  if (!match) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  const multiplier = match[2] === "k" ? 1000 : match[2] === "m" ? 1000000 : 1
+  const result = Math.round(amount * multiplier)
+  return Number.isSafeInteger(result) && result > 0 ? result : null
 }
 
 function toNonNegativeInteger(value, fallback = 0) {
@@ -652,7 +669,21 @@ function parseGoalArguments(args, defaults) {
         continue
       }
 
-      const parsedValue = parsePositiveIntegerStrict(stripWrappingQuotes(value))
+      const rawValue = stripWrappingQuotes(value)
+
+      if (flagSpec.type === "tokens") {
+        const budget = parseTokenBudget(rawValue)
+        if (budget === null) {
+          errors.push(
+            `Invalid token budget for ${flagName}: ${value} (use a positive number, optionally with a k or m suffix)`,
+          )
+          continue
+        }
+        options[flagSpec.optionKey] = budget
+        continue
+      }
+
+      const parsedValue = parsePositiveIntegerStrict(rawValue)
       if (parsedValue === null) {
         errors.push(`Invalid positive integer for ${flagName}: ${value}`)
         continue
@@ -819,7 +850,7 @@ function formatArgumentErrors(errors) {
     "Goal flags could not be parsed.",
     ...errors.map((error) => `- ${error}`),
     "",
-    "Supported flags: --max-turns, --max-minutes, --max-duration-ms, --max-tokens, --cooldown-ms, --no-progress-threshold, --no-progress-turns.",
+    "Supported flags: --max-turns, --max-minutes, --max-duration-ms, --max-tokens, --budget, --cooldown-ms, --no-progress-threshold, --no-progress-turns.",
     "You can pass them as `--flag value` or `--flag=value`.",
   ].join("\n")
 }
@@ -1475,6 +1506,7 @@ export const testInternals = {
   outputTokensForMessage,
   parseGoalArguments,
   parsePositiveIntegerStrict,
+  parseTokenBudget,
   pruneGoalResults,
   stopReason,
 }

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Add a `Publish` GitHub Actions workflow (`.github/workflows/publish.yml`) for npm Trusted Publishing (OIDC).** On a push to `main` it runs the full check matrix (`npm run check` / `smoke` / `pack:check` on Node 18/20/22), then publishes via OIDC with no stored `NPM_TOKEN`. Uses a publish-on-version-change model: `package.json`'s version is the source of truth, and the publish step compares it against npm and only publishes when the version is new, so routine merges to `main` are no-ops. The publish job requires `id-token: write` and is gated behind a `release` environment. First run still requires a human to publish an initial version and configure the npm Trusted Publisher — until then the publish step fails rather than publishing silently.
+- **Add an inline `--budget <n>` flag on the `/goal` create command.** A shorthand for the context-token limit (`--max-tokens`) that accepts a plain integer or a `k`/`m` suffix, e.g. `/goal ship it --budget 100k` (= 100,000 context tokens) or `--budget=1.5m`. Invalid or non-positive values are rejected with a clear error like the other flags. New `parseTokenBudget` helper (suffix-aware) and a `tokens` flag type in the argument parser; unit and parsing tests. Implements megalist item 8.1.
 
 ## 0.2.0 — 2026-06-14
 

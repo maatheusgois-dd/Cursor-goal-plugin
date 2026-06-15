@@ -151,6 +151,7 @@ Override any limit for a single goal:
 | `--max-minutes <n>` | Duration limit in minutes |
 | `--max-duration-ms <n>` | Duration limit in milliseconds |
 | `--max-tokens <n>` | Context token limit |
+| `--budget <n>` | Context token limit shorthand; accepts a `k`/`m` suffix (e.g. `100k`, `1.5m`) |
 | `--cooldown-ms <n>` | Minimum delay between continues |
 | `--no-progress-threshold <n>` | Output token floor before pausing |
 | `--no-progress-turns <n>` | Consecutive stalled low-output turns before pausing |
@@ -161,6 +162,7 @@ Examples:
 /goal fix tests --max-turns 20 --max-tokens 400000
 /goal fix tests --max-turns=20 --max-tokens=400000
 /goal fix tests --no-progress-threshold 50 --no-progress-turns 2
+/goal fix tests --budget 100k
 ```
 
 ### Plugin-level defaults

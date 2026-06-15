@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Default goal state to a project-local path, with an env override and migration fallbacks.** State now resolves with the precedence `stateFilePath` option → `OPENCODE_GOAL_STATE_PATH` env var → project-local `<cwd>/.opencode/goals/state.json` (previously it defaulted to `~/.opencode-goal-plugin/state.json`), so goals follow the project. When the default path has no state yet, the plugin migrates forward on first load from the legacy `~/.opencode-goal-plugin/state.json` and the XDG path `${XDG_STATE_HOME:-~/.local/state}/opencode-goal-plugin/state.json`, then writes to the project-local path. An explicit `stateFilePath` or `OPENCODE_GOAL_STATE_PATH` is used literally with no fallback, and a present-but-corrupt primary file is preserved rather than overwritten. New `resolveStateFilePath` / `xdgStateFilePath` / `legacyStateFilePaths` helpers and an `applyParsedStateFile` refactor of the loader; unit tests for resolution/precedence plus an end-to-end migration test. Implements megalist items 6.1 and 6.2.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

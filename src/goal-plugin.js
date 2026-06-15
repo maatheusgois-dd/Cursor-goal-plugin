@@ -4,7 +4,11 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
 const STATE_FILE_VERSION = 1
-const DEFAULT_STATE_FILE_PATH = join(homedir(), ".opencode-goal-plugin", "state.json")
+// Default state now follows the project: <cwd>/.opencode/goals/state.json.
+// The legacy home-dir path and the XDG state path are read as migration
+// fallbacks so existing users do not lose state when upgrading.
+const PROJECT_LOCAL_STATE_SUBPATH = join(".opencode", "goals", "state.json")
+const LEGACY_HOME_STATE_FILE_PATH = join(homedir(), ".opencode-goal-plugin", "state.json")
 const MAX_HISTORY_ENTRIES = 20
 const MAX_CHECKPOINTS = 5
 const CHECKPOINT_CHAR_LIMIT = 280
@@ -363,14 +367,45 @@ function normalizeOptions(options = {}) {
   }
 }
 
-function normalizePersistenceOptions(options = {}) {
-  return {
-    persistState: options.persistState !== false,
-    stateFilePath:
-      typeof options.stateFilePath === "string" && options.stateFilePath.trim()
-        ? options.stateFilePath.trim()
-        : DEFAULT_STATE_FILE_PATH,
-  }
+// XDG-style state path: $XDG_STATE_HOME/opencode-goal-plugin/state.json,
+// defaulting to ~/.local/state when XDG_STATE_HOME is unset.
+function xdgStateFilePath(env = process.env) {
+  const base =
+    typeof env?.XDG_STATE_HOME === "string" && env.XDG_STATE_HOME.trim()
+      ? env.XDG_STATE_HOME.trim()
+      : join(homedir(), ".local", "state")
+  return join(base, "opencode-goal-plugin", "state.json")
+}
+
+// State-file resolution precedence:
+//   1. explicit `stateFilePath` plugin option
+//   2. OPENCODE_GOAL_STATE_PATH environment variable
+//   3. project-local default: <cwd>/.opencode/goals/state.json
+function resolveStateFilePath({ stateFilePath, env = process.env, cwd } = {}) {
+  if (typeof stateFilePath === "string" && stateFilePath.trim()) return stateFilePath.trim()
+  const envPath = env?.OPENCODE_GOAL_STATE_PATH
+  if (typeof envPath === "string" && envPath.trim()) return envPath.trim()
+  const base = typeof cwd === "string" && cwd.trim() ? cwd : process.cwd()
+  return join(base, PROJECT_LOCAL_STATE_SUBPATH)
+}
+
+// Read-only migration fallbacks, tried in order when the resolved default path
+// has no file yet. Only used for the project-local default — an explicit option
+// or env override is taken literally with no fallback.
+function legacyStateFilePaths(env = process.env) {
+  return [LEGACY_HOME_STATE_FILE_PATH, xdgStateFilePath(env)]
+}
+
+function normalizePersistenceOptions(options = {}, { env = process.env, cwd } = {}) {
+  const persistState = options.persistState !== false
+  const hasExplicitLocation =
+    (typeof options.stateFilePath === "string" && options.stateFilePath.trim()) ||
+    (typeof env?.OPENCODE_GOAL_STATE_PATH === "string" && env.OPENCODE_GOAL_STATE_PATH.trim())
+  const stateFilePath = resolveStateFilePath({ stateFilePath: options.stateFilePath, env, cwd })
+  const fallbackPaths = hasExplicitLocation
+    ? []
+    : legacyStateFilePaths(env).filter((path) => path !== stateFilePath)
+  return { persistState, stateFilePath, fallbackPaths }
 }
 
 function isPlainObject(value) {
@@ -509,70 +544,103 @@ function deserializeGoal(goal) {
   return hydrated
 }
 
+// Parse one state-file body and apply it to runtime state. Returns "loaded" on
+// success or "invalid" when the version/shape is unsupported. Throws on
+// JSON.parse failure (handled by the caller).
+async function applyParsedStateFile(raw, client) {
+  const parsed = JSON.parse(raw)
+  if (parsed?.version !== STATE_FILE_VERSION) {
+    await logPluginError(
+      client,
+      `Skipped persisted goal state: unsupported version ${parsed?.version ?? "unknown"}.`,
+    )
+    return "invalid"
+  }
+
+  if (!Array.isArray(parsed.goals) || !Array.isArray(parsed.results)) {
+    await logPluginError(client, "Skipped persisted goal state: malformed goals/results arrays.")
+    return "invalid"
+  }
+
+  const loadedGoals = []
+  let skippedGoals = 0
+  for (const rawGoal of parsed.goals) {
+    const normalizedGoal = normalizePersistedGoal(rawGoal)
+    if (normalizedGoal) {
+      loadedGoals.push(normalizedGoal)
+    } else {
+      skippedGoals += 1
+    }
+  }
+
+  const loadedResults = []
+  let skippedResults = 0
+  for (const rawResult of parsed.results) {
+    const normalizedResult = normalizePersistedResult(rawResult)
+    if (normalizedResult) {
+      loadedResults.push(normalizedResult)
+    } else {
+      skippedResults += 1
+    }
+  }
+
+  if (skippedGoals > 0 || skippedResults > 0) {
+    await logPluginError(
+      client,
+      `Skipped invalid persisted entries: ${skippedGoals} goal(s), ${skippedResults} result(s).`,
+    )
+  }
+
+  clearRuntimeState()
+
+  for (const goal of loadedGoals) {
+    goalStates.set(goal.sessionID, deserializeGoal(goal))
+  }
+
+  for (const result of loadedResults) {
+    lastGoalResults.set(result.sessionID, result)
+  }
+
+  return "loaded"
+}
+
 async function loadPersistedState(persistenceOptions, client) {
   if (!persistenceOptions.persistState) return "disabled"
 
-  try {
-    const raw = await fs.readFile(persistenceOptions.stateFilePath, "utf8")
-    const parsed = JSON.parse(raw)
-    if (parsed?.version !== STATE_FILE_VERSION) {
-      await logPluginError(
-        client,
-        `Skipped persisted goal state: unsupported version ${parsed?.version ?? "unknown"}.`,
-      )
-      return "invalid"
+  const candidates = [
+    { path: persistenceOptions.stateFilePath, primary: true },
+    ...(persistenceOptions.fallbackPaths || []).map((path) => ({ path, primary: false })),
+  ]
+
+  for (const { path, primary } of candidates) {
+    let raw
+    try {
+      raw = await fs.readFile(path, "utf8")
+    } catch (error) {
+      if (error?.code === "ENOENT") continue
+      // A present-but-unreadable primary file should not be silently
+      // overwritten, so report it as invalid rather than missing.
+      await logPluginError(client, "Failed to load persisted goal state", error)
+      if (primary) return "invalid"
+      continue
     }
 
-    if (!Array.isArray(parsed.goals) || !Array.isArray(parsed.results)) {
-      await logPluginError(client, "Skipped persisted goal state: malformed goals/results arrays.")
-      return "invalid"
+    let status
+    try {
+      status = await applyParsedStateFile(raw, client)
+    } catch (error) {
+      await logPluginError(client, "Failed to load persisted goal state", error)
+      if (primary) return "invalid"
+      continue
     }
 
-    const loadedGoals = []
-    let skippedGoals = 0
-    for (const rawGoal of parsed.goals) {
-      const normalizedGoal = normalizePersistedGoal(rawGoal)
-      if (normalizedGoal) {
-        loadedGoals.push(normalizedGoal)
-      } else {
-        skippedGoals += 1
-      }
-    }
-
-    const loadedResults = []
-    let skippedResults = 0
-    for (const rawResult of parsed.results) {
-      const normalizedResult = normalizePersistedResult(rawResult)
-      if (normalizedResult) {
-        loadedResults.push(normalizedResult)
-      } else {
-        skippedResults += 1
-      }
-    }
-
-    if (skippedGoals > 0 || skippedResults > 0) {
-      await logPluginError(
-        client,
-        `Skipped invalid persisted entries: ${skippedGoals} goal(s), ${skippedResults} result(s).`,
-      )
-    }
-
-    clearRuntimeState()
-
-    for (const goal of loadedGoals) {
-      goalStates.set(goal.sessionID, deserializeGoal(goal))
-    }
-
-    for (const result of loadedResults) {
-      lastGoalResults.set(result.sessionID, result)
-    }
-
-    return "loaded"
-  } catch (error) {
-    if (error?.code === "ENOENT") return "missing"
-    await logPluginError(client, "Failed to load persisted goal state", error)
-    return "invalid"
+    if (status === "loaded") return primary ? "loaded" : "migrated"
+    // status === "invalid": preserve a present-but-corrupt primary; for a
+    // fallback, keep trying the next candidate.
+    if (primary) return "invalid"
   }
+
+  return "missing"
 }
 
 async function persistState(persistenceOptions, client) {
@@ -950,7 +1018,13 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   clearRuntimeState()
   const persistedStateStatus = await loadPersistedState(persistenceOptions, client)
   pruneGoalResults(defaultGoalOptions)
-  if (persistedStateStatus === "loaded" || persistedStateStatus === "missing") {
+  // "migrated" means state was loaded from a legacy/XDG fallback path; persist
+  // it to the resolved (project-local) path so it migrates forward.
+  if (
+    persistedStateStatus === "loaded" ||
+    persistedStateStatus === "missing" ||
+    persistedStateStatus === "migrated"
+  ) {
     await persist()
   }
 
@@ -1471,10 +1545,14 @@ export const testInternals = {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  legacyStateFilePaths,
   normalizeOptions,
+  normalizePersistenceOptions,
   outputTokensForMessage,
   parseGoalArguments,
   parsePositiveIntegerStrict,
   pruneGoalResults,
+  resolveStateFilePath,
   stopReason,
+  xdgStateFilePath,
 }

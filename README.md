@@ -133,7 +133,15 @@ Markers must appear on their own final line. The bracketed form is canonical, bu
 
 **Wrap-up vs. hard stop.** When a limit is reached, the plugin sends one final prompt asking the assistant to summarize what is done, what remains, and the next concrete step — rather than stopping silently. Use `/goal resume` to continue after any stop, including limit stops and no-progress pauses.
 
-Goal state is persisted by default to `~/.opencode-goal-plugin/state.json`, but only as a local workflow checkpoint. It is not synchronized across machines or OpenCode instances.
+Goal state is persisted by default to a **project-local** path, `.opencode/goals/state.json` relative to the working directory, so goals follow the project rather than your home directory. It is only a local workflow checkpoint and is not synchronized across machines or OpenCode instances. You may want to add `.opencode/goals/` to your `.gitignore`.
+
+The state-file location is resolved with this precedence:
+
+1. the `stateFilePath` plugin option, if set;
+2. the `OPENCODE_GOAL_STATE_PATH` environment variable, if set;
+3. the project-local default `<cwd>/.opencode/goals/state.json`.
+
+When the default path has no state yet, the plugin migrates forward from older locations on first load: the legacy `~/.opencode-goal-plugin/state.json` and the XDG path `${XDG_STATE_HOME:-~/.local/state}/opencode-goal-plugin/state.json`. An explicit `stateFilePath` or `OPENCODE_GOAL_STATE_PATH` is used literally with no migration fallback.
 
 The state directory is created with owner-only permissions, and the JSON state file is written as `0600` because it may contain goal text, assistant checkpoints, and workflow history.
 
@@ -183,7 +191,7 @@ Pass options when registering the plugin to change the defaults for all goals. T
         "budgetWrapupRatio": 0.8,
         "maxPromptFailures": 3,
         "persistState": true,
-        "stateFilePath": "/home/you/.opencode-goal-plugin/state.json",
+        "stateFilePath": ".opencode/goals/state.json",
         "resultRetentionMs": 604800000,
         "maxStoredResults": 200
       }
@@ -198,7 +206,7 @@ Additional plugin-level options:
 - `noProgressTurnsBeforePause` — grace window for low-output stalls. The plugin pauses only after this many consecutive stalled low-output turns rather than on the first one.
 - `warnTurnsRemaining` / `warnDurationMsRemaining` / `warnTokensRemaining` — thresholds at which the auto-continue prompt appends a "limits are near" warning (default `3` turns, `60000` ms, `25000` context tokens). Lower them to warn closer to the limit, or raise them to warn earlier.
 - `persistState` — whether to persist active goals and recent goal results to disk.
-- `stateFilePath` — where the persisted state JSON is written. Useful if you want per-project or ephemeral storage.
+- `stateFilePath` — where the persisted state JSON is written. Overrides the default project-local path and the `OPENCODE_GOAL_STATE_PATH` env var. Useful if you want a fixed or ephemeral location. When unset, the default is `<cwd>/.opencode/goals/state.json` (see the persistence section above), and `OPENCODE_GOAL_STATE_PATH` can override it without editing config.
 - `resultRetentionMs` — how long a completed goal summary remains available through `/goal status` after the goal leaves active memory.
 - `maxStoredResults` — maximum number of completed-goal summaries retained in process memory before the oldest ones are evicted.
 

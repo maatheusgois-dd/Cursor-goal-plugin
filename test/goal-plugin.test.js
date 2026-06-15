@@ -19,6 +19,7 @@ const {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  listSessionGoals,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
@@ -1976,4 +1977,117 @@ test("compaction autocontinue is a no-op when no goal is active", async () => {
   const output = { enabled: true }
   await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac-none" }, output)
   assert.equal(output.enabled, true)
+})
+
+// ── Multi-goal management (items 3.1 / 3.2 / 3.3) ──────────────────────────
+
+async function runGoal(hooks, sessionID, args) {
+  const output = { parts: [] }
+  await hooks["command.execute.before"]({ command: "goal", sessionID, arguments: args }, output)
+  return output.parts[0]?.text || ""
+}
+
+test("/goal add keeps the previous goal, backgrounds it, and focuses the new one", async () => {
+  const { hooks } = await createHooks()
+  const sid = "multi-s1"
+
+  await runGoal(hooks, sid, "first goal")
+  assert.equal(currentGoal(sid).condition, "first goal")
+
+  const addText = await runGoal(hooks, sid, "add second goal")
+  assert.match(addText, /Added and focused new goal: second goal/)
+  assert.match(addText, /Backgrounded previous goal: first goal/)
+
+  // Two live goals; the new one is focused and running, the old one backgrounded.
+  const goals = listSessionGoals(sid)
+  assert.equal(goals.length, 2)
+  assert.equal(currentGoal(sid).condition, "second goal")
+  assert.equal(currentGoal(sid).stopped, false)
+  const first = goals.find((g) => g.condition === "first goal")
+  assert.equal(first.stopped, true)
+  assert.equal(first.stopReason, "backgrounded")
+})
+
+test("/goal list shows numbered live goals and archived results", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    options: { minDelayMs: 1 },
+  })
+  const sid = "multi-s2"
+
+  await runGoal(hooks, sid, "alpha")
+  await runGoal(hooks, sid, "add beta")
+  const listText = await runGoal(hooks, sid, "list")
+  assert.match(listText, /Goals \(2\):/)
+  assert.match(listText, /\[focused\] beta/)
+  assert.match(listText, /\[background\] alpha/)
+
+  // Complete the focused goal → it moves to the archive and stays readable.
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: sid, status: { type: "idle" } } },
+  })
+  const afterList = await runGoal(hooks, sid, "list")
+  assert.match(afterList, /Archived \(1, newest last\):/)
+  assert.match(afterList, /\[achieved\] beta/)
+})
+
+test("/goal focus switches the active goal and backgrounds the prior one", async () => {
+  const { hooks } = await createHooks()
+  const sid = "multi-s3"
+
+  await runGoal(hooks, sid, "one")
+  await runGoal(hooks, sid, "add two")
+  assert.equal(currentGoal(sid).condition, "two")
+
+  const focusText = await runGoal(hooks, sid, "focus 1")
+  assert.match(focusText, /Focused goal: one/)
+  assert.match(focusText, /Backgrounded: two/)
+  assert.equal(currentGoal(sid).condition, "one")
+  assert.equal(currentGoal(sid).stopped, false)
+
+  const two = listSessionGoals(sid).find((g) => g.condition === "two")
+  assert.equal(two.stopped, true)
+  assert.equal(two.stopReason, "backgrounded")
+
+  // Already-focused and out-of-range refs are handled gracefully.
+  assert.match(await runGoal(hooks, sid, "focus 1"), /already focused/i)
+  assert.match(await runGoal(hooks, sid, "focus 9"), /No goal matches/)
+})
+
+test("only the focused goal is auto-continued; backgrounded goals stay paused", async () => {
+  const { calls, hooks } = await createHooks({ options: { minDelayMs: 1 } })
+  const sid = "multi-s4"
+  await runGoal(hooks, sid, "primary")
+  await runGoal(hooks, sid, "add secondary")
+
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: sid, status: { type: "idle" } } },
+  })
+
+  // Exactly one auto-continue was sent — for the focused goal only.
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].body.parts[0].text, /secondary/)
+})
+
+test("multiple live goals and focus survive a persistence round-trip", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-multi-"))
+  const stateFilePath = join(dir, "state.json")
+  const client = {
+    app: { log: async () => {} },
+    session: { messages: async () => ({ data: [] }), promptAsync: async () => ({}) },
+  }
+  try {
+    const hooks = await GoalPlugin({ client }, { persistState: true, stateFilePath, minDelayMs: 1 })
+    await runGoal(hooks, "persist-s", "goal one")
+    await runGoal(hooks, "persist-s", "add goal two")
+
+    // Reload from disk: both goals present, "goal two" still focused.
+    await GoalPlugin({ client }, { persistState: true, stateFilePath, minDelayMs: 1 })
+    const goals = listSessionGoals("persist-s")
+    assert.equal(goals.length, 2)
+    // Recovered goals load paused, but focus is preserved.
+    assert.equal(currentGoal("persist-s").condition, "goal two")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

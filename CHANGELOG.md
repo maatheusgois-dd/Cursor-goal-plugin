@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Support multiple goals per session with `/goal add`, `/goal list`, and `/goal focus`.** A session can now hold several live goals via a new `sessionGoals` registry; `goalStates` continues to track the single *focused* goal that the idle handler drives and the system prompt injects. `/goal <condition>` still replaces the focused goal, while `/goal add <condition>` backgrounds the current goal and focuses a new one (only the focused goal is auto-continued). `/goal list` shows numbered live goals (focused vs. backgrounded) plus a per-session archive of completed/cleared goals so they stay readable, and `/goal focus <number|id>` switches the active goal, backgrounding the previous one. Focus is tracked per session and persisted (state files gain a `focused` flag per goal and an `archives` array; older single-goal files load with their one goal focused). New `buildGoalState` / `formatGoalList` / session-registry helpers with command and persistence round-trip tests. Implements megalist items 3.1, 3.2, and 3.3.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

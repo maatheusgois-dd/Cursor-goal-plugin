@@ -6,6 +6,7 @@ import test from "node:test"
 import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 
 const {
+  appendLedgerLine,
   buildCompactionContext,
   buildCompactionProgressSummary,
   buildContinueMessage,
@@ -20,6 +21,7 @@ const {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  ledgerPathFor,
   legacyStateFilePaths,
   listSessionGoals,
   normalizeCommandOptions,
@@ -29,7 +31,10 @@ const {
   outputTokensForMessage,
   parseGoalArguments,
   parseTokenBudget,
+  readLedgerEntries,
+  reconstructGoalsFromLedger,
   resolveStateFilePath,
+  setLedgerSink,
   stopReason,
   totalTokensForMessage,
   xdgStateFilePath,
@@ -2444,6 +2449,96 @@ test("multiple live goals and focus survive a persistence round-trip", async () 
     // Recovered goals load paused, but focus is preserved.
     assert.equal(currentGoal("persist-s").condition, "goal two")
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// ── Lifecycle ledger + fail-closed (items 2.3 / 2.5) ───────────────────────
+
+test("appendLedgerLine and readLedgerEntries round-trip and skip malformed lines", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-ledger-"))
+  const ledgerPath = join(dir, "ledger.jsonl")
+  try {
+    assert.equal(appendLedgerLine(ledgerPath, { ts: 1, sessionID: "s", goalId: "g", type: "set", condition: "x" }), true)
+    assert.equal(appendLedgerLine(ledgerPath, { ts: 2, sessionID: "s", goalId: "g", type: "completed" }), true)
+    // A corrupt partial line must not break reading.
+    await writeFile(ledgerPath, "not json\n", { flag: "a" })
+
+    const entries = await readLedgerEntries(ledgerPath)
+    assert.equal(entries.length, 2)
+    assert.equal(entries[0].type, "set")
+    assert.equal(entries[1].type, "completed")
+    // Missing file → empty array, no throw.
+    assert.deepEqual(await readLedgerEntries(join(dir, "nope.jsonl")), [])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("reconstructGoalsFromLedger recovers non-terminal goals and ignores completed/cleared", () => {
+  const entries = [
+    { ts: 1, sessionID: "s1", goalId: "g1", condition: "active goal", type: "set", detail: "created" },
+    { ts: 2, sessionID: "s1", goalId: "g1", condition: "active goal", type: "auto-continue", detail: "turn 1" },
+    { ts: 3, sessionID: "s2", goalId: "g2", condition: "finished goal", type: "set", detail: "created" },
+    { ts: 4, sessionID: "s2", goalId: "g2", condition: "finished goal", type: "completed", detail: "done" },
+    // s3's latest goal supersedes an older completed one and is still active.
+    { ts: 5, sessionID: "s3", goalId: "old", condition: "old", type: "completed", detail: "" },
+    { ts: 6, sessionID: "s3", goalId: "new", condition: "new goal", type: "set", detail: "created" },
+  ]
+  const recovered = reconstructGoalsFromLedger(entries)
+  const bySession = Object.fromEntries(recovered.map((g) => [g.sessionID, g]))
+  assert.ok(bySession.s1)
+  assert.equal(bySession.s1.condition, "active goal")
+  assert.equal(bySession.s2, undefined) // completed → not recovered
+  assert.equal(bySession.s3.condition, "new goal")
+})
+
+test("lifecycle events are written to the ledger and a missing state file recovers from it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-ledger-"))
+  const stateFilePath = join(dir, "state.json")
+  const ledgerFilePath = ledgerPathFor(stateFilePath)
+  const client = {
+    app: { log: async () => {} },
+    session: {
+      messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+      promptAsync: async () => ({}),
+    },
+  }
+  try {
+    const hooks = await GoalPlugin({ client }, { persistState: true, stateFilePath, minDelayMs: 1 })
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "ledger-s1", arguments: "ship the ledger" },
+      { parts: [] },
+    )
+    // A `set` event with the objective is in the ledger.
+    let entries = await readLedgerEntries(ledgerFilePath)
+    assert.ok(entries.some((e) => e.type === "set" && e.condition === "ship the ledger"))
+
+    // Complete the goal → terminal `completed` event recorded in the ledger.
+    await hooks.event({
+      event: { type: "session.status", properties: { sessionID: "ledger-s1", status: { type: "idle" } } },
+    })
+    entries = await readLedgerEntries(ledgerFilePath)
+    assert.ok(entries.some((e) => e.type === "completed"))
+
+    // Now set a fresh, still-active goal, then delete the state file and
+    // reinitialize: the goal must be reconstructed from the ledger.
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "ledger-s2", arguments: "recover me" },
+      { parts: [] },
+    )
+    await rm(stateFilePath, { force: true })
+
+    await GoalPlugin({ client }, { persistState: true, stateFilePath, minDelayMs: 1 })
+    const recovered = currentGoal("ledger-s2")
+    assert.ok(recovered)
+    assert.equal(recovered.condition, "recover me")
+    assert.equal(recovered.stopped, true) // recovered goals load paused
+    // Reconstruction persisted a fresh state file.
+    const rebuilt = JSON.parse(await readFile(stateFilePath, "utf8"))
+    assert.ok(rebuilt.goals.some((g) => g.sessionID === "ledger-s2"))
+  } finally {
+    setLedgerSink(null)
     await rm(dir, { recursive: true, force: true })
   }
 })

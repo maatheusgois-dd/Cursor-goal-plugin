@@ -165,7 +165,9 @@ When the default path has no state yet, the plugin migrates forward from older l
 
 The state directory is created with owner-only permissions, and the JSON state file is written as `0600` because it may contain goal text, assistant checkpoints, and workflow history.
 
-Recovered active goals are loaded in a **paused** state with a recovery note, so unattended auto-continue does not resume blindly after a restart. Set `"persistState": false` to keep purely in-memory behavior.
+Alongside the state file the plugin keeps an **append-only lifecycle ledger** (`<stateFile>.ledger.jsonl`, also `0600`). Every lifecycle event — set, edit, auto-continue, pause, resume, blocked, completed, limit — is appended as one JSON line. Because the in-memory history is capped, the ledger is the durable record: if the main state file is missing or corrupted, the plugin reconstructs still-active (non-completed) goals from the ledger on startup and reloads them in the paused recovery state. Terminal events (complete/blocked) are written to the ledger *before* the main state write, so a goal's terminal outcome survives even if that write fails (**fail-closed**); such a failure is logged at error level.
+
+Recovered active goals are loaded in a **paused** state with a recovery note, so unattended auto-continue does not resume blindly after a restart. Set `"persistState": false` to keep purely in-memory behavior (this also disables the ledger).
 
 `/goal resume` continues the same objective with a fresh local budget window. This lets you continue after pause, blocker, no-progress pause, rate-limit failures, or a limit stop without retyping the objective.
 

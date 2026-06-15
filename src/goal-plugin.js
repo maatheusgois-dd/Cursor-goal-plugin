@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { promises as fs } from "node:fs"
+import { promises as fs, appendFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -148,10 +148,120 @@ function makeHistoryEntry(type, detail, timestamp = Date.now()) {
   }
 }
 
+// Append-only lifecycle ledger (item 2.3). pushHistory emits every lifecycle
+// event to this sink, which a configured plugin instance points at a JSONL
+// file. Because the in-memory history is truncated to MAX_HISTORY_ENTRIES, the
+// ledger is the durable record used to reconstruct state if the main state file
+// is lost or corrupted, and it captures terminal events even when the main
+// state write fails (fail-closed, item 2.5).
+let ledgerSink = null
+
+function setLedgerSink(sink) {
+  ledgerSink = typeof sink === "function" ? sink : null
+}
+
+function emitLedgerEvent(goal, type, detail, timestamp) {
+  if (!ledgerSink) return
+  try {
+    ledgerSink({
+      ts: timestamp,
+      sessionID: goal.sessionID,
+      goalId: goal.goalId,
+      condition: goal.condition,
+      type,
+      detail,
+    })
+  } catch {
+    // The ledger is best-effort durability; never let it break the workflow.
+  }
+}
+
 function pushHistory(goal, type, detail, timestamp = Date.now()) {
-  goal.history = [...(goal.history || []), makeHistoryEntry(type, detail, timestamp)].slice(
-    -MAX_HISTORY_ENTRIES,
-  )
+  const entry = makeHistoryEntry(type, detail, timestamp)
+  goal.history = [...(goal.history || []), entry].slice(-MAX_HISTORY_ENTRIES)
+  emitLedgerEvent(goal, entry.type, entry.detail, entry.timestamp)
+}
+
+// Synchronous append keeps lifecycle events ordered and durable without
+// unawaited promises leaking past teardown. Owner-only perms mirror the state
+// file. Failures are reported to the caller, not thrown.
+function appendLedgerLine(ledgerFilePath, entry) {
+  try {
+    mkdirSync(dirname(ledgerFilePath), { recursive: true, mode: 0o700 })
+    appendFileSync(ledgerFilePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function readLedgerEntries(ledgerFilePath) {
+  let raw
+  try {
+    raw = await fs.readFile(ledgerFilePath, "utf8")
+  } catch {
+    return []
+  }
+  const entries = []
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (isPlainObject(parsed)) entries.push(parsed)
+    } catch {
+      // Skip malformed lines so a partial write can't break recovery.
+    }
+  }
+  return entries
+}
+
+const LEDGER_TERMINAL_TYPES = new Set(["completed", "cleared"])
+
+// Reconstruct still-active goals from ledger events: group by session, take the
+// most recent goalId per session, and recover it (as a paused goal) unless a
+// terminal event (completed/cleared) was recorded for that goalId.
+function reconstructGoalsFromLedger(entries) {
+  const ordered = [...entries]
+    .filter((entry) => isPlainObject(entry) && typeof entry.sessionID === "string" && entry.sessionID)
+    .sort((a, b) => normalizeTimestamp(a.ts, 0) - normalizeTimestamp(b.ts, 0))
+
+  const latestGoalIdBySession = new Map()
+  const eventsByGoalId = new Map()
+  for (const entry of ordered) {
+    const goalId = typeof entry.goalId === "string" && entry.goalId ? entry.goalId : `${entry.sessionID}:unknown`
+    latestGoalIdBySession.set(entry.sessionID, goalId)
+    if (!eventsByGoalId.has(goalId)) eventsByGoalId.set(goalId, [])
+    eventsByGoalId.get(goalId).push(entry)
+  }
+
+  const reconstructed = []
+  for (const [sessionID, goalId] of latestGoalIdBySession.entries()) {
+    const events = eventsByGoalId.get(goalId) || []
+    const terminal = events.some((event) => LEDGER_TERMINAL_TYPES.has(event.type))
+    if (terminal) continue
+    const condition = [...events].reverse().find((event) => typeof event.condition === "string" && event.condition.trim())?.condition?.trim()
+    if (!condition) continue
+
+    const history = events
+      .map((event) =>
+        makeHistoryEntry(
+          typeof event.type === "string" && event.type.trim() ? event.type.trim() : "event",
+          typeof event.detail === "string" ? event.detail : "",
+          normalizeTimestamp(event.ts),
+        ),
+      )
+      .slice(-MAX_HISTORY_ENTRIES)
+
+    reconstructed.push({
+      sessionID,
+      goalId,
+      condition,
+      startedAt: normalizeTimestamp(events[0]?.ts),
+      history,
+    })
+  }
+  return reconstructed
 }
 
 function recordCheckpoint(goal, text, timestamp = Date.now()) {
@@ -459,6 +569,10 @@ function normalizeOptions(options = {}) {
   }
 }
 
+function ledgerPathFor(stateFilePath) {
+  return `${stateFilePath}.ledger.jsonl`
+}
+
 // XDG-style state path: $XDG_STATE_HOME/opencode-goal-plugin/state.json,
 // defaulting to ~/.local/state when XDG_STATE_HOME is unset.
 function xdgStateFilePath(env = process.env) {
@@ -497,7 +611,11 @@ function normalizePersistenceOptions(options = {}, { env = process.env, cwd } = 
   const fallbackPaths = hasExplicitLocation
     ? []
     : legacyStateFilePaths(env).filter((path) => path !== stateFilePath)
-  return { persistState, stateFilePath, fallbackPaths }
+  const ledgerFilePath =
+    typeof options.ledgerFilePath === "string" && options.ledgerFilePath.trim()
+      ? options.ledgerFilePath.trim()
+      : ledgerPathFor(stateFilePath)
+  return { persistState, stateFilePath, fallbackPaths, ledgerFilePath }
 }
 
 // Command surface options (item 8.2): `commandName` lets the plugin own a
@@ -773,11 +891,39 @@ async function loadPersistedState(persistenceOptions, client) {
     if (primary) return "invalid"
   }
 
-  return "missing"
+  // No state file found at any candidate path → try reconstructing from the
+  // append-only ledger before giving up.
+  return reconstructFromLedger(persistenceOptions, client)
+}
+
+// Last-resort recovery: when the main state file is absent, rebuild still-active
+// goals from the append-only ledger so a lost/rotated state file does not drop
+// in-flight goals (item 2.3). Recovered goals are paused (via deserializeGoal).
+async function reconstructFromLedger(persistenceOptions, client) {
+  const entries = await readLedgerEntries(persistenceOptions.ledgerFilePath)
+  if (!entries.length) return "missing"
+
+  const reconstructed = reconstructGoalsFromLedger(entries)
+  if (!reconstructed.length) return "missing"
+
+  clearRuntimeState()
+  for (const stub of reconstructed) {
+    const normalized = normalizePersistedGoal(stub)
+    if (normalized) {
+      const hydrated = deserializeGoal(normalized)
+      registerSessionGoal(hydrated)
+      focusGoal(hydrated.sessionID, hydrated)
+    }
+  }
+  await logPluginError(
+    client,
+    `Reconstructed ${reconstructed.length} active goal(s) from the lifecycle ledger after a missing state file.`,
+  )
+  return goalStates.size > 0 ? "reconstructed" : "missing"
 }
 
 async function persistState(persistenceOptions, client) {
-  if (!persistenceOptions.persistState) return
+  if (!persistenceOptions.persistState) return true
 
   try {
     await fs.mkdir(dirname(persistenceOptions.stateFilePath), { recursive: true, mode: 0o700 })
@@ -819,8 +965,10 @@ async function persistState(persistenceOptions, client) {
     )
     await fs.rename(tmpPath, persistenceOptions.stateFilePath)
     await fs.chmod(persistenceOptions.stateFilePath, 0o600)
+    return true
   } catch (error) {
     await logPluginError(client, "Failed to persist goal state", error)
+    return false
   }
 }
 
@@ -1315,15 +1463,38 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   const { commandName, registerCommand } = normalizeCommandOptions(pluginOptions)
   const persist = async () => persistState(persistenceOptions, client)
 
+  // Fail-closed (item 2.5): when persisting a terminal state (complete/blocked)
+  // fails, surface it loudly. The terminal event is already in the append-only
+  // ledger, so it stays recoverable across a restart even though the main state
+  // file write did not land.
+  const persistTerminalState = async (label) => {
+    const ok = await persist()
+    if (!ok && persistenceOptions.persistState) {
+      await logPluginError(
+        client,
+        `Failed to persist ${label} terminal state; recorded in the lifecycle ledger for recovery.`,
+      )
+    }
+    return ok
+  }
+
+  // Route lifecycle events to the JSONL ledger only when persistence is on.
+  if (persistenceOptions.persistState) {
+    setLedgerSink((entry) => appendLedgerLine(persistenceOptions.ledgerFilePath, entry))
+  } else {
+    setLedgerSink(null)
+  }
+
   clearRuntimeState()
   const persistedStateStatus = await loadPersistedState(persistenceOptions, client)
   pruneGoalResults(defaultGoalOptions)
-  // "migrated" means state was loaded from a legacy/XDG fallback path; persist
-  // it to the resolved (project-local) path so it migrates forward.
+  // "migrated" = loaded from a legacy/XDG fallback path; "reconstructed" =
+  // rebuilt from the ledger. Both persist forward to the resolved path.
   if (
     persistedStateStatus === "loaded" ||
     persistedStateStatus === "missing" ||
-    persistedStateStatus === "migrated"
+    persistedStateStatus === "migrated" ||
+    persistedStateStatus === "reconstructed"
   ) {
     await persist()
   }
@@ -1697,10 +1868,12 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
 
         if (goalIsComplete(latestText)) {
           activeGoalAfterMessages.lastStatus = "Goal completed."
+          // pushHistory writes the terminal event to the durable ledger first,
+          // so even if the state write below fails the completion is recoverable.
           pushHistory(activeGoalAfterMessages, "completed", "Assistant marked the goal complete.")
           rememberGoalResult(sessionID, activeGoalAfterMessages, "achieved")
           cleanupGoal(sessionID)
-          await persist()
+          await persistTerminalState("completion")
           return
         }
 
@@ -1714,7 +1887,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             "blocked",
             activeGoalAfterMessages.blockedReason || "Assistant reported blocked and requested user input.",
           )
-          await persist()
+          await persistTerminalState("blocked")
           return
         }
 
@@ -1931,6 +2104,11 @@ export const testInternals = {
   activeGoal,
   listSessionGoals,
   formatGoalList,
+  appendLedgerLine,
+  readLedgerEntries,
+  reconstructGoalsFromLedger,
+  ledgerPathFor,
+  setLedgerSink,
   buildLimitWarning,
   buildCompactionContext,
   buildCompactionProgressSummary,

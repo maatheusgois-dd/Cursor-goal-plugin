@@ -7,6 +7,9 @@ import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 
 const {
   appendLedgerLine,
+  buildAuditPrompt,
+  parseAuditVerdict,
+  createChildSessionAuditor,
   buildCompactionContext,
   buildCompactionProgressSummary,
   buildContinueMessage,
@@ -2936,4 +2939,126 @@ test("defaultAuditMessenger posts through client.app.log and tolerates its absen
   assert.equal(logs[0].body.extra.kind, "goal-audit")
   // No app.log available → no throw.
   await defaultAuditMessenger({}, "s", "x")
+})
+
+// ── Separate completion auditor (item 2.2) ─────────────────────────────────
+
+test("parseAuditVerdict reads the verdict marker and reason", () => {
+  assert.deepEqual(parseAuditVerdict("looks complete\n[audit:approved]"), { approved: true, reason: "" })
+
+  const rejected = parseAuditVerdict("the suite is still red\n[audit:rejected]")
+  assert.equal(rejected.approved, false)
+  assert.match(rejected.reason, /suite is still red/)
+
+  // Both markers present → rejected (conservative).
+  assert.equal(parseAuditVerdict("[audit:approved] then [audit:rejected]").approved, false)
+  // No clear verdict → rejected (fail closed).
+  assert.equal(parseAuditVerdict("hmm, not sure").approved, false)
+})
+
+test("buildAuditPrompt frames the goal and asks for a verdict marker", () => {
+  const prompt = buildAuditPrompt({ condition: "ship it" }, "All done\n[goal:complete]")
+  assert.match(prompt, /independent completion auditor/i)
+  assert.match(prompt, /ship it/)
+  assert.match(prompt, /\[audit:approved\]/)
+  assert.match(prompt, /\[audit:rejected\]/)
+})
+
+test("an approving auditor archives the goal", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({
+      data: [message("All done!\n[goal:evidence] suite green\n[goal:complete]")],
+    }),
+    options: { minDelayMs: 1, auditor: async () => ({ approved: true }) },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "audit-ok", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "audit-ok", status: { type: "idle" } } },
+  })
+  assert.equal(currentGoal("audit-ok"), null)
+
+  const statusOutput = { parts: [] }
+  await hooks["command.execute.before"]({ command: "goal", sessionID: "audit-ok", arguments: "status" }, statusOutput)
+  assert.match(statusOutput.parts[0].text, /State: achieved/)
+})
+
+test("a rejecting auditor restores (pauses) the goal instead of archiving", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({
+      data: [message("All done!\n[goal:evidence] suite green\n[goal:complete]")],
+    }),
+    options: { minDelayMs: 1, auditor: async () => ({ approved: false, reason: "tests still fail" }) },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "audit-no", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "audit-no", status: { type: "idle" } } },
+  })
+
+  const goal = currentGoal("audit-no")
+  assert.ok(goal) // not archived
+  assert.equal(goal.stopped, true)
+  assert.equal(goal.stopReason, "audit rejected")
+  assert.match(goal.lastStatus, /tests still fail/)
+})
+
+test("an auditor that throws is treated as a rejection (fail closed)", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({
+      data: [message("All done!\n[goal:evidence] suite green\n[goal:complete]")],
+    }),
+    options: {
+      minDelayMs: 1,
+      auditor: async () => {
+        throw new Error("auditor pipeline down")
+      },
+    },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "audit-throw", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "audit-throw", status: { type: "idle" } } },
+  })
+
+  const goal = currentGoal("audit-throw")
+  assert.ok(goal)
+  assert.equal(goal.stopReason, "audit rejected")
+})
+
+test("createChildSessionAuditor parses a child-session verdict and fails open without the API", async () => {
+  const approveClient = {
+    session: {
+      create: async () => ({ id: "child-1" }),
+      prompt: async () => ({ parts: [textPart("verified\n[audit:approved]")] }),
+    },
+  }
+  assert.deepEqual(
+    await createChildSessionAuditor(approveClient)({ goal: { condition: "x" }, sessionID: "s", latestText: "done" }),
+    { approved: true, reason: "" },
+  )
+
+  const rejectClient = {
+    session: {
+      create: async () => ({ id: "child-1" }),
+      prompt: async () => ({ parts: [textPart("missing tests\n[audit:rejected]")] }),
+    },
+  }
+  const rejected = await createChildSessionAuditor(rejectClient)({
+    goal: { condition: "x" },
+    sessionID: "s",
+    latestText: "done",
+  })
+  assert.equal(rejected.approved, false)
+  assert.match(rejected.reason, /missing tests/)
+
+  // No child-session API → fail open (auto-approve) so a missing pipeline never blocks work.
+  const noApi = await createChildSessionAuditor({})({ goal: { condition: "x" }, sessionID: "s", latestText: "done" })
+  assert.equal(noApi.approved, true)
 })

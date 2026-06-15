@@ -254,6 +254,14 @@ Additional plugin-level options:
 ## Audit messages
 
 When the assistant marks a goal complete or blocked, the plugin announces the audit instead of doing it silently: an audit-start message ("Auditing goal completion…") and an audit-result message ("completion accepted — goal archived" / "paused as blocked — …"). By default these are delivered through OpenCode's structured log (`client.app.log`, visible to the user). Provide an `auditMessenger(sessionID, text)` plugin option to route them elsewhere (for example into the live conversation once a suitable message API is available), or set `auditMessages: false` to disable them.
+## Completion auditor (optional)
+
+By default a `[goal:complete]` is accepted on the assistant's word. You can require an independent audit before a goal is archived:
+
+- `completionAudit: true` — the plugin spawns an independent OpenCode child session to verify the completion against the goal and workspace. The auditor replies with `[audit:approved]` or `[audit:rejected]` (with a reason).
+- `auditor: async ({ goal, sessionID, latestText }) => ({ approved, reason })` — supply your own auditor function (takes precedence over `completionAudit`).
+
+On **approval** the goal is archived as achieved. On **rejection** the goal is *not* archived — it is paused with stop reason `audit rejected` and the reason in its status, so you can address the gap and `/goal resume`. The built-in child-session auditor fails *open* (auto-approves) if the session API is unavailable, while a custom auditor that throws is treated as a rejection (fail closed). The audit is off unless one of these options is set.
 
 ## Prompt safety
 

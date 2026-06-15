@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Announce completion/blocker audits with visible messages instead of silent background work.** When the assistant marks a goal complete or blocked, the plugin now emits an audit-start message and an audit-result message (e.g. "Auditing goal completion: verifying … is satisfied" → "Audit result: completion accepted — goal archived"). Delivery defaults to OpenCode's structured log (`client.app.log`) and is pluggable via an `auditMessenger(sessionID, text)` option (the integration point for routing audit notices into the live conversation) or disable-able with `auditMessages: false`. New `defaultAuditMessenger` helper with handler and unit tests. Implements megalist item 2.4.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

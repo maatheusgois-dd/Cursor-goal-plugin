@@ -942,10 +942,43 @@ function budgetWrapupNeeded(goal) {
   )
 }
 
+// Visible audit messages (item 2.4): when the plugin audits a completion or
+// blocker it announces the audit and its result instead of doing the work
+// silently. Delivery is via this default messenger (structured app log, the
+// channel OpenCode surfaces to the user) or a caller-supplied `auditMessenger`
+// — the integration point for routing audit notices into the live conversation
+// once a non-prompting message API is available.
+async function defaultAuditMessenger(client, sessionID, text) {
+  if (client?.app?.log) {
+    await client.app.log({
+      body: {
+        service: "opencode-goal-plugin",
+        level: "info",
+        message: text,
+        extra: { sessionID, kind: "goal-audit" },
+      },
+    })
+  }
+}
+
 export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   const defaultGoalOptions = normalizeOptions(pluginOptions)
   const persistenceOptions = normalizePersistenceOptions(pluginOptions)
   const persist = async () => persistState(persistenceOptions, client)
+
+  const auditMessagesEnabled = pluginOptions.auditMessages !== false
+  const auditMessenger =
+    typeof pluginOptions.auditMessenger === "function"
+      ? pluginOptions.auditMessenger
+      : (sessionID, text) => defaultAuditMessenger(client, sessionID, text)
+  const announceAudit = async (sessionID, text) => {
+    if (!auditMessagesEnabled) return
+    try {
+      await auditMessenger(sessionID, text)
+    } catch (error) {
+      await logPluginError(client, "Failed to deliver goal audit message", error)
+    }
+  }
 
   clearRuntimeState()
   const persistedStateStatus = await loadPersistedState(persistenceOptions, client)
@@ -1229,15 +1262,24 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         activeGoalAfterMessages.lastAssistantMessageID = latestAssistantID
 
         if (goalIsComplete(latestText)) {
+          await announceAudit(
+            sessionID,
+            `Auditing goal completion: verifying "${summarizeText(activeGoalAfterMessages.condition, 120)}" is satisfied before archiving.`,
+          )
           activeGoalAfterMessages.lastStatus = "Goal completed."
           pushHistory(activeGoalAfterMessages, "completed", "Assistant marked the goal complete.")
           rememberGoalResult(sessionID, activeGoalAfterMessages, "achieved")
           cleanupGoal(sessionID)
           await persist()
+          await announceAudit(sessionID, "Audit result: completion accepted — goal archived as achieved.")
           return
         }
 
         if (goalIsBlocked(latestText)) {
+          await announceAudit(
+            sessionID,
+            `Auditing goal blocker: the assistant reported it is blocked on "${summarizeText(activeGoalAfterMessages.condition, 120)}".`,
+          )
           activeGoalAfterMessages.blockedReason = extractBlockedReason(latestText)
           activeGoalAfterMessages.lastStatus = "Assistant reported blocked."
           activeGoalAfterMessages.stopped = true
@@ -1248,6 +1290,10 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             activeGoalAfterMessages.blockedReason || "Assistant reported blocked and requested user input.",
           )
           await persist()
+          await announceAudit(
+            sessionID,
+            `Audit result: goal paused as blocked${activeGoalAfterMessages.blockedReason ? ` — ${summarizeText(activeGoalAfterMessages.blockedReason, 160)}` : ""}. Run /goal resume after addressing it.`,
+          )
           return
         }
 
@@ -1454,6 +1500,7 @@ export default {
 
 export const testInternals = {
   activeGoal,
+  defaultAuditMessenger,
   buildLimitWarning,
   buildCompactionContext,
   buildContinueMessage,

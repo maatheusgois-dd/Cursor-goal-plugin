@@ -12,6 +12,7 @@ const {
   buildLimitWarning,
   budgetWrapupNeeded,
   currentGoal,
+  defaultAuditMessenger,
   escapeGoalText,
   extractBlockedReason,
   formatStatus,
@@ -1976,4 +1977,79 @@ test("compaction autocontinue is a no-op when no goal is active", async () => {
   const output = { enabled: true }
   await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-ac-none" }, output)
   assert.equal(output.enabled, true)
+})
+
+// ── Visible audit messages (item 2.4) ──────────────────────────────────────
+
+test("completion emits visible audit-start and audit-result messages", async () => {
+  const audits = []
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    options: { minDelayMs: 1, auditMessenger: async (sid, text) => audits.push({ sid, text }) },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "audit-s1", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "audit-s1", status: { type: "idle" } } },
+  })
+
+  assert.equal(audits.length, 2)
+  assert.equal(audits[0].sid, "audit-s1")
+  assert.match(audits[0].text, /Auditing goal completion/)
+  assert.match(audits[1].text, /completion accepted/)
+})
+
+test("blocker emits visible audit-start and audit-result messages", async () => {
+  const audits = []
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("Need the API key first.\n[goal:blocked]")] }),
+    options: { minDelayMs: 1, auditMessenger: async (sid, text) => audits.push(text) },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "audit-s2", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "audit-s2", status: { type: "idle" } } },
+  })
+
+  assert.equal(audits.length, 2)
+  assert.match(audits[0], /Auditing goal blocker/)
+  assert.match(audits[1], /paused as blocked/)
+  assert.match(audits[1], /Need the API key first/)
+})
+
+test("auditMessages:false suppresses audit messages", async () => {
+  const audits = []
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    options: {
+      minDelayMs: 1,
+      auditMessages: false,
+      auditMessenger: async (sid, text) => audits.push(text),
+    },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "audit-s3", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "audit-s3", status: { type: "idle" } } },
+  })
+
+  assert.equal(audits.length, 0)
+  // The goal still completed despite audit messages being off.
+  assert.equal(currentGoal("audit-s3"), null)
+})
+
+test("defaultAuditMessenger posts through client.app.log and tolerates its absence", async () => {
+  const logs = []
+  await defaultAuditMessenger({ app: { log: async (input) => logs.push(input) } }, "s", "hello audit")
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0].body.message, "hello audit")
+  assert.equal(logs[0].body.extra.kind, "goal-audit")
+  // No app.log available → no throw.
+  await defaultAuditMessenger({}, "s", "x")
 })

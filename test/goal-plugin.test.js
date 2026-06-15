@@ -7,6 +7,7 @@ import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 
 const {
   buildCompactionContext,
+  buildCompactionProgressSummary,
   buildContinueMessage,
   buildGoalBlock,
   buildLimitWarning,
@@ -1943,6 +1944,61 @@ test("buildCompactionContext includes the latest checkpoint when present", () =>
   const context = buildCompactionContext(goal)
   assert.match(context, /Latest checkpoint: wrote the parser/)
   assert.match(context, /finish the audit/)
+})
+
+test("buildCompactionProgressSummary is deterministic and built from the persisted record (item 6.3)", () => {
+  const now = Date.now()
+  const goal = {
+    checkpoints: [
+      { summary: "set up the schema", timestamp: now - 3000 },
+      { summary: "wrote the migration", timestamp: now - 2000 },
+      { summary: "ran the tests", timestamp: now - 1000 },
+      { summary: "fixed a failure", timestamp: now - 500 },
+    ],
+    history: [
+      { type: "set", detail: "Goal created.", timestamp: now - 4000 },
+      { type: "auto-continue", detail: "Sent auto-continue 1.", timestamp: now - 3000 },
+      { type: "auto-continue", detail: "Sent auto-continue 2.", timestamp: now - 2000 },
+    ],
+  }
+
+  const summary = buildCompactionProgressSummary(goal, { maxCheckpoints: 3, maxEvents: 2 })
+  // Only the most recent N are kept, oldest-first within the window.
+  assert.ok(summary.includes("Recent checkpoints (oldest first):"))
+  assert.ok(summary.includes("- wrote the migration"))
+  assert.ok(summary.includes("- ran the tests"))
+  assert.ok(summary.includes("- fixed a failure"))
+  assert.equal(summary.includes("- set up the schema"), false) // trimmed by maxCheckpoints
+  assert.ok(summary.includes("Recent lifecycle events (oldest first):"))
+  assert.ok(summary.includes("- auto-continue: Sent auto-continue 2."))
+  assert.equal(summary.includes("- set: Goal created."), false) // trimmed by maxEvents
+
+  // Deterministic: same record → identical output (no chat memory / RNG).
+  assert.deepEqual(buildCompactionProgressSummary(goal), buildCompactionProgressSummary(goal))
+})
+
+test("buildCompactionProgressSummary is empty for a record with no checkpoints or history", () => {
+  assert.deepEqual(buildCompactionProgressSummary({}), [])
+  assert.deepEqual(buildCompactionProgressSummary({ checkpoints: [], history: [] }), [])
+})
+
+test("buildCompactionContext folds in the deterministic progress summary", () => {
+  const now = Date.now()
+  const goal = {
+    condition: "finish the audit",
+    startedAt: now,
+    turnCount: 2,
+    totalTokens: 500,
+    stopped: false,
+    options: { maxTurns: 10, maxTokens: 200000 },
+    lastCheckpoint: { summary: "wrote the parser", timestamp: now },
+    checkpoints: [{ summary: "wrote the parser", timestamp: now }],
+    history: [{ type: "set", detail: "Goal created.", timestamp: now }],
+  }
+  const context = buildCompactionContext(goal)
+  assert.match(context, /reconstructed deterministically from the plugin's persisted goal record/)
+  assert.match(context, /Recent lifecycle events \(oldest first\):/)
+  assert.match(context, /- set: Goal created\./)
 })
 
 test("compaction autocontinue is disabled while a goal is active", async () => {

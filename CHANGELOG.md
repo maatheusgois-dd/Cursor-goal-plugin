@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Build the compaction summary deterministically from the persisted goal record.** `buildCompactionContext` now folds in a reproducible progress summary — recent checkpoints and recent lifecycle events — derived from the goal's persisted `checkpoints`/`history` (new `buildCompactionProgressSummary` helper) rather than chat memory, and labels it as such. This makes the post-compaction context stable across runs and richer (the assistant sees recent progress, not just the latest checkpoint). New unit tests cover the summary windowing, determinism, the empty case, and its inclusion in the compaction context. Implements megalist item 6.3.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

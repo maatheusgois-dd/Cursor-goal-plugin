@@ -783,6 +783,28 @@ function buildContinueMessage(goal, { budgetWrapup = false } = {}) {
   return lines.filter(Boolean).join("\n")
 }
 
+// Deterministic progress summary built from the plugin's persisted goal record
+// (checkpoints + lifecycle history) rather than from chat memory, so it is
+// stable and reproducible across a compaction (item 6.3).
+function buildCompactionProgressSummary(goal, { maxCheckpoints = 3, maxEvents = 6 } = {}) {
+  const lines = []
+  const checkpoints = Array.isArray(goal.checkpoints) ? goal.checkpoints.slice(-maxCheckpoints) : []
+  if (checkpoints.length) {
+    lines.push("Recent checkpoints (oldest first):")
+    for (const checkpoint of checkpoints) {
+      lines.push(`- ${summarizeText(checkpoint.summary, 200)}`)
+    }
+  }
+  const events = Array.isArray(goal.history) ? goal.history.slice(-maxEvents) : []
+  if (events.length) {
+    lines.push("Recent lifecycle events (oldest first):")
+    for (const event of events) {
+      lines.push(`- ${event.type}: ${summarizeText(event.detail, 160)}`)
+    }
+  }
+  return lines
+}
+
 function buildCompactionContext(goal) {
   // Preserve the active goal across an OpenCode session compaction. Without
   // this, a compaction can drop the goal objective and budget state from the
@@ -791,10 +813,12 @@ function buildCompactionContext(goal) {
   const elapsedSeconds = Math.round((Date.now() - goal.startedAt) / 1000)
   return [
     "An OpenCode goal is active for this session. Preserve it across compaction.",
+    "The summary below is reconstructed deterministically from the plugin's persisted goal record, not from chat memory.",
     buildGoalBlock(goal),
     `Goal status: ${goal.stopped ? goal.stopReason || "stopped" : "active"}.`,
     `Auto-continues used: ${goal.turnCount}/${goal.options.maxTurns}. Context tokens: ${goal.totalTokens}/${goal.options.maxTokens}. Elapsed: ${elapsedSeconds}s.`,
     goal.lastCheckpoint ? `Latest checkpoint: ${goal.lastCheckpoint.summary}` : null,
+    ...buildCompactionProgressSummary(goal),
     "After compaction, continue from the next concrete unfinished step while the goal is active. Verify the result against the goal objective before ending; output [goal:complete] only when fully satisfied, or [goal:blocked] only if user input is required.",
   ]
     .filter(Boolean)
@@ -1456,6 +1480,7 @@ export const testInternals = {
   activeGoal,
   buildLimitWarning,
   buildCompactionContext,
+  buildCompactionProgressSummary,
   buildContinueMessage,
   buildGoalBlock,
   budgetWrapupNeeded,

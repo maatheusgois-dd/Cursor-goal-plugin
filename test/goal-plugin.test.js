@@ -19,11 +19,13 @@ const {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  isPluginContinuationMessage,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
   stopReason,
   totalTokensForMessage,
+  userInterventionDetected,
 } = testInternals
 
 function textPart(text) {
@@ -39,6 +41,20 @@ function message(text, tokens = { input: 1, output: 100, reasoning: 0 }) {
       tokens,
     },
     parts: [textPart(text)],
+  }
+}
+
+function userMessage(text, id = "msg-user") {
+  return {
+    info: { id, role: "user", sessionID: "session-1" },
+    parts: [textPart(text)],
+  }
+}
+
+function pluginContinuationMessage(id = "msg-plugin") {
+  return {
+    info: { id, role: "user", sessionID: "session-1" },
+    parts: [textPart("<goal_continuation>\n<goal_objective>\nship it\n</goal_objective>\n</goal_continuation>")],
   }
 }
 
@@ -158,6 +174,114 @@ test("blocked reason is extracted from line before marker", () => {
     extractBlockedReason("I need the API key before continuing.\ngoal:blocked"),
     "I need the API key before continuing.",
   )
+})
+
+test("isPluginContinuationMessage only matches plugin continuation user messages", () => {
+  assert.equal(isPluginContinuationMessage(pluginContinuationMessage()), true)
+  assert.equal(isPluginContinuationMessage(userMessage("do something else")), false)
+  // An assistant message that quotes the marker is not a plugin continuation.
+  assert.equal(
+    isPluginContinuationMessage({
+      info: { id: "a", role: "assistant", sessionID: "session-1" },
+      parts: [textPart("<goal_continuation>")],
+    }),
+    false,
+  )
+})
+
+test("userInterventionDetected ignores plugin messages and respects ordering", () => {
+  const goalRunning = { turnCount: 1 }
+  const goalFresh = { turnCount: 0 }
+
+  // Real user message after the plugin's continuation → intervention.
+  assert.equal(
+    userInterventionDetected(
+      [pluginContinuationMessage(), message("worked on it"), userMessage("actually do X"), message("ok")],
+      goalRunning,
+    ),
+    true,
+  )
+  // Only a plugin continuation present (no real user after it) → no intervention.
+  assert.equal(
+    userInterventionDetected([pluginContinuationMessage(), message("worked on it")], goalRunning),
+    false,
+  )
+  // Real user message but no plugin continuation visible → cannot confirm; no intervention.
+  assert.equal(userInterventionDetected([userMessage("hi"), message("ok")], goalRunning), false)
+  // Real user message is older than the latest plugin continuation → no intervention.
+  assert.equal(
+    userInterventionDetected([userMessage("old"), pluginContinuationMessage(), message("ok")], goalRunning),
+    false,
+  )
+  // Loop has not started yet (turnCount 0) → never intervention.
+  assert.equal(
+    userInterventionDetected([pluginContinuationMessage(), userMessage("X"), message("ok")], goalFresh),
+    false,
+  )
+})
+
+test("a real user message during the loop pauses auto-continue (latest instruction wins)", async () => {
+  const calls = []
+  const client = {
+    app: { log: async () => {} },
+    session: {
+      messages: async () => ({
+        data: [pluginContinuationMessage(), message("did a step"), userMessage("stop, do Y instead"), message("sure")],
+      }),
+      promptAsync: async (input) => {
+        calls.push(input)
+        return {}
+      },
+    },
+  }
+  const hooks = await GoalPlugin({ client }, { persistState: false, minDelayMs: 1 })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+  // Simulate that the loop is already running.
+  const goal = currentGoal("session-1")
+  goal.turnCount = 1
+  goal.lastContinueAt = Date.now() - 10
+
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "session-1", status: { type: "idle" } } },
+  })
+
+  assert.equal(calls.length, 0)
+  assert.equal(currentGoal("session-1").stopped, true)
+  assert.equal(currentGoal("session-1").stopReason, "user intervention")
+})
+
+test("the plugin's own continuation messages do not count as user intervention", async () => {
+  const calls = []
+  const client = {
+    app: { log: async () => {} },
+    session: {
+      // Latest user message is the plugin's own continuation prompt.
+      messages: async () => ({ data: [pluginContinuationMessage(), message("still working")] }),
+      promptAsync: async (input) => {
+        calls.push(input)
+        return {}
+      },
+    },
+  }
+  const hooks = await GoalPlugin({ client }, { persistState: false, minDelayMs: 1 })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+  const goal = currentGoal("session-1")
+  goal.turnCount = 1
+  goal.lastContinueAt = Date.now() - 10
+
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID: "session-1", status: { type: "idle" } } },
+  })
+
+  // No false intervention: the loop continued.
+  assert.equal(calls.length, 1)
+  assert.equal(currentGoal("session-1").stopped, false)
 })
 
 test("recognizes session.status idle events alongside deprecated session.idle", () => {

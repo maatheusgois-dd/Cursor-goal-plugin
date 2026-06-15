@@ -98,6 +98,7 @@ Clear the active goal:
 2. Each time the session goes idle, the plugin sends a continuation prompt containing the goal, the remaining budget, and a completion audit asking the assistant to verify the current state before declaring done.
 3. The plugin stops auto-continuing when the assistant ends a response with `[goal:complete]` or `[goal:blocked]`, or when a safety limit is reached.
 4. If OpenCode compacts the session, the plugin injects the goal objective, budget usage, and latest checkpoint into the compaction context so the goal survives the compaction and the assistant keeps the thread. While a goal is active, the plugin also disables OpenCode's generic post-compaction auto-continue so it does not race the plugin's own continuation.
+5. If you send a message of your own while the goal is running, the plugin treats it as the latest instruction and pauses auto-continue so it does not talk over you. The plugin's own continuation prompts are ignored for this check (they are not "your" messages). Run `/goal resume` to hand control back to the goal loop.
 
 ## Completion markers
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Pause auto-continue when a real user message arrives ("latest instruction wins").** The idle handler now detects a genuine human message that arrived after the plugin's most recent continuation prompt and pauses the goal (stop reason `user intervention`) instead of talking over the user; `/goal resume` hands control back. Plugin-generated continuation/audit prompts (user-role messages framed in `<goal_continuation>`) are explicitly ignored for this check, so the plugin never mistakes its own prompts for user input. Detection requires the loop to be running (`turnCount > 0`) and a plugin continuation to be visible in the recent window, so the first idle after `/goal set` and long sessions where continuations scrolled out of view are never misread. New `isPluginContinuationMessage` / `userInterventionDetected` helpers plus unit and handler tests. Implements megalist items 5.2 and 5.3.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

@@ -931,6 +931,40 @@ function findLatestAssistantMessage(messages) {
   return [...(messages || [])].reverse().find((message) => messageRole(message) === "assistant") || null
 }
 
+// The plugin drives auto-continue by sending its own prompts via promptAsync,
+// which appear in the session as user-role messages. Every such prompt is
+// framed inside <goal_continuation>, so a user message containing that marker
+// is plugin-generated, not a real human instruction. escapeGoalText neutralizes
+// any forged <goal_continuation in goal text, so genuine goal text cannot
+// masquerade as a plugin continuation.
+function isPluginContinuationMessage(message) {
+  return (
+    messageRole(message) === "user" && getText(message?.parts).includes("<goal_continuation>")
+  )
+}
+
+// "Latest instruction wins": detect a real (human) user message that arrived
+// after the plugin's most recent continuation prompt. Plugin-generated
+// continuation/audit messages are ignored (item 5.2). Detection requires the
+// loop to be running (turnCount > 0) and a plugin continuation to be visible in
+// the recent window, so the first idle after /goal set and sessions where the
+// continuations have scrolled out of view are never misread as intervention.
+function userInterventionDetected(messages, goal) {
+  if (!goal || goal.turnCount <= 0) return false
+  const list = Array.isArray(messages) ? messages : []
+  let lastPluginContinuationIndex = -1
+  let lastRealUserIndex = -1
+  for (let i = 0; i < list.length; i += 1) {
+    if (messageRole(list[i]) !== "user") continue
+    if (isPluginContinuationMessage(list[i])) {
+      lastPluginContinuationIndex = i
+    } else {
+      lastRealUserIndex = i
+    }
+  }
+  return lastPluginContinuationIndex >= 0 && lastRealUserIndex > lastPluginContinuationIndex
+}
+
 function outputTokensForMessage(message) {
   return toNonNegativeInteger(messageTokens(message).output)
 }
@@ -1228,6 +1262,23 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         activeGoalAfterMessages.lastAssistantText = latestText
         activeGoalAfterMessages.lastAssistantMessageID = latestAssistantID
 
+        // Latest instruction wins: if a real (non-plugin) user message arrived
+        // since the last auto-continue, stop driving the loop and defer to the
+        // human. They can /goal resume to hand control back to the plugin.
+        if (userInterventionDetected(messages.data, activeGoalAfterMessages)) {
+          activeGoalAfterMessages.stopped = true
+          activeGoalAfterMessages.stopReason = "user intervention"
+          activeGoalAfterMessages.lastStatus =
+            "Auto-continue paused: you sent a new message, so the latest instruction wins. Run /goal resume to continue the goal."
+          pushHistory(
+            activeGoalAfterMessages,
+            "paused",
+            "Paused auto-continue after a real user message arrived; latest instruction wins.",
+          )
+          await persist()
+          return
+        }
+
         if (goalIsComplete(latestText)) {
           activeGoalAfterMessages.lastStatus = "Goal completed."
           pushHistory(activeGoalAfterMessages, "completed", "Assistant marked the goal complete.")
@@ -1471,7 +1522,9 @@ export const testInternals = {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  isPluginContinuationMessage,
   normalizeOptions,
+  userInterventionDetected,
   outputTokensForMessage,
   parseGoalArguments,
   parsePositiveIntegerStrict,

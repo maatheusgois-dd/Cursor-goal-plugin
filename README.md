@@ -157,6 +157,8 @@ Markers must appear on their own final line. The bracketed form is canonical, bu
 
 **No-progress heuristic.** A low-output turn does not pause immediately anymore. The plugin pauses only after `noProgressTurnsBeforePause` consecutive *stalled* low-output turns — repeated turns with very little output and no meaningful change in the latest assistant checkpoint.
 
+**No-tool-call heuristic.** Complementing the no-progress check, the plugin also watches for continuation turns that produce no tool calls at all (a "talk only" turn). Repeated talk-only turns usually mean the assistant is chatting to itself rather than doing work, so after `noToolCallTurnsBeforePause` consecutive tool-free continuation turns the plugin pauses. A turn that uses any tool (or delegates a subtask) resets the counter.
+
 **Wrap-up vs. hard stop.** When a limit is reached, the plugin sends one final prompt asking the assistant to summarize what is done, what remains, and the next concrete step — rather than stopping silently. Use `/goal resume` to continue after any stop, including limit stops and no-progress pauses.
 
 Goal state is persisted by default to a **project-local** path, `.opencode/goals/state.json` relative to the working directory, so goals follow the project rather than your home directory. It is only a local workflow checkpoint and is not synchronized across machines or OpenCode instances. You may want to add `.opencode/goals/` to your `.gitignore`.
@@ -194,6 +196,7 @@ Override any limit for a single goal:
 | `--success <text>` | Success criteria that define when the goal is satisfied (quote multi-word text) |
 | `--constraints <text>` | Constraints / non-goals to respect (alias `--non-goals`) |
 | `--mode <normal\|ordered>` | Execution mode; `ordered` (alias `sisyphus`) asks for a strict sequence |
+| `--no-tool-turns <n>` | Consecutive tool-free continuation turns before pausing |
 
 Examples:
 
@@ -221,6 +224,7 @@ Pass options when registering the plugin to change the defaults for all goals. T
         "maxRecentMessages": 50,
         "noProgressTokenThreshold": 50,
         "noProgressTurnsBeforePause": 2,
+        "noToolCallTurnsBeforePause": 2,
         "budgetWrapupRatio": 0.8,
         "maxPromptFailures": 3,
         "persistState": true,
@@ -237,6 +241,7 @@ Additional plugin-level options:
 
 - `maxRecentMessages` — how many recent session messages to scan when looking for the latest assistant turn before auto-continuing. Higher values make long, tool-heavy sessions less likely to lose the most recent assistant response.
 - `noProgressTurnsBeforePause` — grace window for low-output stalls. The plugin pauses only after this many consecutive stalled low-output turns rather than on the first one.
+- `noToolCallTurnsBeforePause` — grace window for tool-free continuation turns. The plugin pauses after this many consecutive continuation turns that produced no tool calls (anti self-chat loop). Default `2`.
 - `warnTurnsRemaining` / `warnDurationMsRemaining` / `warnTokensRemaining` — thresholds at which the auto-continue prompt appends a "limits are near" warning (default `3` turns, `60000` ms, `25000` context tokens). Lower them to warn closer to the limit, or raise them to warn earlier.
 - `commandName` — the slash command the plugin owns (default `goal`). Set it to e.g. `objective` to drive the workflow with `/objective` instead of `/goal`; a leading slash is tolerated. Remember to register the matching command name in your OpenCode `command` config. User-facing hints (`/goal status`, `/goal resume`, …) follow the configured name.
 - `registerCommand` — whether the plugin installs its `command.execute.before` hook at all (default `true`). Set it to `false` if you only want the auto-continue/persistence behavior driven programmatically and don't want the plugin to own a slash command.

@@ -25,6 +25,7 @@ const {
   ledgerPathFor,
   legacyStateFilePaths,
   listSessionGoals,
+  messageHasToolCall,
   normalizeCommandOptions,
   normalizeMode,
   normalizeOptions,
@@ -54,6 +55,18 @@ function message(text, tokens = { input: 1, output: 100, reasoning: 0 }) {
       tokens,
     },
     parts: [textPart(text)],
+  }
+}
+
+function toolMessage(text, tokens = { input: 1, output: 100, reasoning: 0 }) {
+  return {
+    info: {
+      id: "msg-tool",
+      role: "assistant",
+      sessionID: "session-1",
+      tokens,
+    },
+    parts: [textPart(text), { type: "tool", tool: "bash", state: { status: "completed" } }],
   }
 }
 
@@ -558,6 +571,69 @@ test("near-zero repeated output pauses after the configured grace window", async
   assert.equal(calls.length, 2)
   assert.equal(currentGoal("session-1").stopped, true)
   assert.equal(currentGoal("session-1").stopReason, "no progress")
+})
+
+test("messageHasToolCall detects tool/subtask parts", () => {
+  assert.equal(messageHasToolCall({ parts: [{ type: "text", text: "hi" }] }), false)
+  assert.equal(
+    messageHasToolCall({ parts: [{ type: "text", text: "hi" }, { type: "tool", tool: "bash" }] }),
+    true,
+  )
+  assert.equal(messageHasToolCall({ parts: [{ type: "subtask" }] }), true)
+  assert.equal(messageHasToolCall({ parts: [{ type: "tool-invocation" }] }), true)
+  assert.equal(messageHasToolCall(null), false)
+  assert.equal(messageHasToolCall({}), false)
+})
+
+test("continuation turns with no tool calls pause after the grace window", async () => {
+  const { calls, hooks } = await createHooks({
+    // High output (so the low-output check never fires) but text-only: no tools.
+    messages: async () => ({ data: [message("Thinking out loud about the plan.")] }),
+    options: { minDelayMs: 1, noToolCallTurnsBeforePause: 2 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+  for (let i = 0; i < 3; i += 1) {
+    await hooks.event({
+      event: { type: "session.status", properties: { sessionID: "session-1", status: { type: "idle" } } },
+    })
+  }
+
+  // Two continuations were sent (turn 1 and the grace turn), then the gate paused.
+  assert.equal(calls.length, 2)
+  const goal = currentGoal("session-1")
+  assert.equal(goal.stopped, true)
+  assert.equal(goal.stopReason, "no tool calls")
+})
+
+test("continuation turns that use tools do not trip the no-tool-call gate", async () => {
+  const { calls, hooks } = await createHooks({
+    messages: async () => ({ data: [toolMessage("Ran the build.")] }),
+    options: { minDelayMs: 1, noToolCallTurnsBeforePause: 2 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-1", arguments: "ship it" },
+    { parts: [] },
+  )
+  for (let i = 0; i < 3; i += 1) {
+    await hooks.event({
+      event: { type: "session.status", properties: { sessionID: "session-1", status: { type: "idle" } } },
+    })
+  }
+
+  assert.equal(calls.length, 3)
+  const goal = currentGoal("session-1")
+  assert.equal(goal.stopped, false)
+  assert.equal(goal.noToolCallTurns, 0)
+})
+
+test("--no-tool-turns flag overrides the no-tool-call grace window", () => {
+  const parsed = parseGoalArguments("ship it --no-tool-turns 4", normalizeOptions())
+  assert.equal(parsed.condition, "ship it")
+  assert.equal(parsed.options.noToolCallTurnsBeforePause, 4)
+  assert.deepEqual(parsed.errors, [])
 })
 
 test("short assistant updates that change content do not immediately count as stalled", async () => {

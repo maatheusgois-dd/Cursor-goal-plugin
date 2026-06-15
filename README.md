@@ -104,6 +104,16 @@ A session can hold more than one goal. `/goal <condition>` replaces the focused 
 
 `/goal list` shows the numbered live goals (which is focused, which are backgrounded) and a per-session archive of completed/cleared goals so they stay readable. `/goal focus <number>` switches the active goal, backgrounding the previous one. Focus is tracked per session and survives a restart.
 
+#### Ordered (sisyphus) sequences
+
+`/goal sisyphus` sets up a strict execution sequence: separate the objectives with `;` or newlines, and the plugin runs them one at a time, auto-focusing the next as soon as the current one completes.
+
+```
+/goal sisyphus build the parser; write the tests; ship the release
+```
+
+The first goal is focused and the rest are queued. `/goal list` marks the session as ordered. Auto-promotion stops when the sequence is exhausted; `/goal clear` ends the sequence.
+
 ## How it works
 
 1. When you set a goal, the plugin stores it in session memory and injects it into the system prompt so the assistant keeps it in view on every turn.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Add `/goal sisyphus` ordered goal sequences.** `/goal sisyphus <obj 1>; <obj 2>; …` (split on `;` or newlines) sets up a strict execution sequence: the first objective is focused and the rest are queued, and when the focused goal completes the plugin auto-promotes the next one to focus so the sequence advances on its own until exhausted. The ordered flag is tracked per session, shown in `/goal list`, persisted across restarts (`orderedSessions` in the state file), and cleared by `/goal clear`. New `promoteNextOrderedGoal` helper plus command, auto-promotion, and persistence tests. Builds on the multi-goal model. Implements megalist item 3.4 (optional/niche).
+
 - **Support multiple goals per session with `/goal add`, `/goal list`, and `/goal focus`.** A session can now hold several live goals via a new `sessionGoals` registry; `goalStates` continues to track the single *focused* goal that the idle handler drives and the system prompt injects. `/goal <condition>` still replaces the focused goal, while `/goal add <condition>` backgrounds the current goal and focuses a new one (only the focused goal is auto-continued). `/goal list` shows numbered live goals (focused vs. backgrounded) plus a per-session archive of completed/cleared goals so they stay readable, and `/goal focus <number|id>` switches the active goal, backgrounding the previous one. Focus is tracked per session and persisted (state files gain a `focused` flag per goal and an `archives` array; older single-goal files load with their one goal focused). New `buildGoalState` / `formatGoalList` / session-registry helpers with command and persistence round-trip tests. Implements megalist items 3.1, 3.2, and 3.3.
 
 ## 0.2.0 — 2026-06-14

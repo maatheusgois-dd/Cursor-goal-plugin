@@ -20,6 +20,7 @@ const {
   goalIsComplete,
   isIdleEvent,
   listSessionGoals,
+  promoteNextOrderedGoal,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,
@@ -2087,6 +2088,94 @@ test("multiple live goals and focus survive a persistence round-trip", async () 
     assert.equal(goals.length, 2)
     // Recovered goals load paused, but focus is preserved.
     assert.equal(currentGoal("persist-s").condition, "goal two")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// ── Sisyphus ordered goals (item 3.4) ──────────────────────────────────────
+
+async function idleOnce(hooks, sessionID) {
+  await hooks.event({
+    event: { type: "session.status", properties: { sessionID, status: { type: "idle" } } },
+  })
+}
+
+test("/goal sisyphus sets up an ordered sequence with the first goal focused", async () => {
+  const { hooks } = await createHooks({ options: { minDelayMs: 1 } })
+  const sid = "sis-s1"
+  const text = await runGoal(hooks, sid, "sisyphus build the parser; write the tests; ship it")
+  assert.match(text, /ordered sequence of 3 goal\(s\)/)
+  assert.match(text, /Focused goal 1: build the parser/)
+
+  const goals = listSessionGoals(sid)
+  assert.equal(goals.length, 3)
+  assert.equal(currentGoal(sid).condition, "build the parser")
+  assert.equal(currentGoal(sid).stopped, false)
+  assert.equal(goals[1].stopped, true)
+  assert.equal(goals[1].stopReason, "queued")
+
+  assert.match(await runGoal(hooks, sid, "list"), /ordered \(sisyphus\)/)
+})
+
+test("completing the focused ordered goal auto-promotes the next, then ends the sequence", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({ data: [message("done\n\n[goal:complete]")] }),
+    options: { minDelayMs: 1 },
+  })
+  const sid = "sis-s2"
+  await runGoal(hooks, sid, "sisyphus alpha; beta; gamma")
+  assert.equal(currentGoal(sid).condition, "alpha")
+
+  await idleOnce(hooks, sid) // completes alpha → promotes beta
+  assert.equal(currentGoal(sid).condition, "beta")
+  assert.equal(currentGoal(sid).stopped, false)
+
+  await idleOnce(hooks, sid) // completes beta → promotes gamma
+  assert.equal(currentGoal(sid).condition, "gamma")
+
+  await idleOnce(hooks, sid) // completes gamma → sequence exhausted
+  assert.equal(currentGoal(sid), null)
+  assert.equal(listSessionGoals(sid).length, 0)
+
+  // The three completed goals are readable in the archive.
+  assert.match(await runGoal(hooks, sid, "list"), /Archived \(3, newest last\):/)
+})
+
+test("promoteNextOrderedGoal focuses the next goal or ends the sequence", async () => {
+  const { hooks } = await createHooks({ options: { minDelayMs: 1 } })
+  const sid = "sis-s3"
+  await runGoal(hooks, sid, "sisyphus one; two")
+  // Drop the focused goal manually, then promote.
+  await runGoal(hooks, sid, "clear") // clears focused "one" and the ordered flag
+
+  // Re-establish a small ordered set and exercise the helper directly.
+  await runGoal(hooks, sid, "sisyphus solo")
+  assert.equal(currentGoal(sid).condition, "solo")
+  // Remove it and promote → nothing left.
+  await runGoal(hooks, sid, "clear")
+  assert.equal(promoteNextOrderedGoal(sid), null)
+})
+
+test("ordered (sisyphus) flag survives a persistence round-trip", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goal-plugin-sis-"))
+  const stateFilePath = join(dir, "state.json")
+  const client = {
+    app: { log: async () => {} },
+    session: { messages: async () => ({ data: [] }), promptAsync: async () => ({}) },
+  }
+  try {
+    const hooks = await GoalPlugin({ client }, { persistState: true, stateFilePath, minDelayMs: 1 })
+    await runGoal(hooks, "sis-persist", "sisyphus first; second")
+
+    await GoalPlugin({ client }, { persistState: true, stateFilePath, minDelayMs: 1 })
+    const reloaded = { parts: [] }
+    await hooks["command.execute.before"](
+      { command: "goal", sessionID: "sis-persist", arguments: "list" },
+      reloaded,
+    )
+    assert.match(reloaded.parts[0].text, /ordered \(sisyphus\)/)
+    assert.equal(listSessionGoals("sis-persist").length, 2)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

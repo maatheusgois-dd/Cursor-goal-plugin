@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Add a `Publish` GitHub Actions workflow (`.github/workflows/publish.yml`) for npm Trusted Publishing (OIDC).** On a push to `main` it runs the full check matrix (`npm run check` / `smoke` / `pack:check` on Node 18/20/22), then publishes via OIDC with no stored `NPM_TOKEN`. Uses a publish-on-version-change model: `package.json`'s version is the source of truth, and the publish step compares it against npm and only publishes when the version is new, so routine merges to `main` are no-ops. The publish job requires `id-token: write` and is gated behind a `release` environment. First run still requires a human to publish an initial version and configure the npm Trusted Publisher — until then the publish step fails rather than publishing silently.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

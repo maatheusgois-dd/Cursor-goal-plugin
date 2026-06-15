@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Require evidence to complete a goal and a concrete blocker to block one.** A `[goal:complete]` marker is now only honored when the assistant also supplies a non-empty `[goal:evidence] <summary>` line (on or before the completion marker); a `[goal:blocked]` is only honored when a concrete blocker is stated on the line before it. An unsubstantiated `[goal:complete]` or `[goal:blocked]` is rejected (not recorded / does not stop the goal) and the plugin sends a corrective continuation prompt demanding the missing evidence or blocker. The accepted evidence is stored on the result and shown in `/goal status` / `/goal history`. New `extractCompletionEvidence` helper, an `<evidence_required>` structural tag (added to the injection-escaping set), and continuation/system/compaction/creation prompts all updated to instruct the evidence requirement. Adds unit tests for evidence extraction and handler tests for the accept/reject paths. Implements megalist item 2.1.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

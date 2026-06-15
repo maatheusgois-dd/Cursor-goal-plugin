@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Add an append-only JSONL lifecycle ledger with state reconstruction, and fail-closed terminal-state persistence.** Every lifecycle event (`pushHistory`) is now also appended as one JSON line to `<stateFile>.ledger.jsonl` (synchronous, owner-only `0600`). Because in-memory history is capped at 20 entries, the ledger is the durable record: when the main state file is missing on startup, the plugin reconstructs still-active (non-`completed`/`cleared`) goals from the ledger and reloads them paused (new `reconstructed` load status). Terminal events (complete/blocked) are written to the ledger before the main state write, so a goal's terminal outcome survives a failed state write (fail-closed); `persistState` now returns success/failure and a failed terminal persist is logged at error level. The ledger is tied to `persistState` (off when persistence is disabled, e.g. the smoke test). New `appendLedgerLine` / `readLedgerEntries` / `reconstructGoalsFromLedger` helpers with unit and end-to-end recovery tests. Implements megalist items 2.3 and 2.5.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

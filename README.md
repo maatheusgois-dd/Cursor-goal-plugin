@@ -50,7 +50,15 @@ Override limits for a single goal:
 /goal fix the failing tests --max-turns 20 --max-minutes 30 --max-tokens 400000
 ```
 
-Flags accept either `--flag value` or `--flag=value`. If a flag is unknown, missing a value, or given a non-positive integer, the plugin rejects the command with a helpful error instead of silently folding the bad flag into the goal text.
+Add success criteria, constraints / non-goals, and a mode:
+
+```
+/goal ship the release --success "tests pass and changelog updated" --constraints "do not touch the public API" --mode ordered
+```
+
+`--success` (alias `--success-criteria`) and `--constraints` (alias `--non-goals`) take quoted text and are injected alongside the objective so the assistant keeps them in view. `--mode` is `normal` (default) or `ordered` (alias `sisyphus`); `ordered` asks the assistant to work through the objective as a strict sequence. Multi-word values must be quoted.
+
+Flags accept either `--flag value` or `--flag=value`. If a flag is unknown, missing a value, given a non-positive integer, or (for `--mode`) an unrecognized mode, the plugin rejects the command with a helpful error instead of silently folding the bad flag into the goal text.
 
 Check status:
 
@@ -154,6 +162,9 @@ Override any limit for a single goal:
 | `--cooldown-ms <n>` | Minimum delay between continues |
 | `--no-progress-threshold <n>` | Output token floor before pausing |
 | `--no-progress-turns <n>` | Consecutive stalled low-output turns before pausing |
+| `--success <text>` | Success criteria that define when the goal is satisfied (quote multi-word text) |
+| `--constraints <text>` | Constraints / non-goals to respect (alias `--non-goals`) |
+| `--mode <normal\|ordered>` | Execution mode; `ordered` (alias `sisyphus`) asks for a strict sequence |
 
 Examples:
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Add success-criteria, constraints/non-goals, and mode to the goal schema.** A goal can now carry `successCriteria` (`--success` / `--success-criteria`), `constraints` (`--constraints` / `--non-goals`), and a `mode` of `normal` (default) or `ordered` (`--mode`, with `sisyphus` accepted as an alias for `ordered`). These are parsed from the create command (string/enum flags alongside the existing integer flags), threaded through goal state and persistence, injected into the goal block (escaped, with new `success_criteria` / `constraints` structural tags) so they ride along in continuation, system-prompt, and compaction context, and surfaced in the creation confirmation and `/goal status`. `ordered` mode adds a "work as a strict sequence" instruction to the injected goal block. New `normalizeMode` helper plus unit, parsing, and command tests. Implements megalist items 4.1, 4.2, and 4.3.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

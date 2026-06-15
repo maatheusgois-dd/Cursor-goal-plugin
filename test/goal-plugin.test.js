@@ -16,6 +16,7 @@ const {
   currentGoal,
   escapeGoalText,
   extractBlockedReason,
+  extractCompletionEvidence,
   formatStatus,
   getSessionID,
   goalIsBlocked,
@@ -354,6 +355,29 @@ test("blocked reason is extracted from line before marker", () => {
     extractBlockedReason("I need the API key before continuing.\ngoal:blocked"),
     "I need the API key before continuing.",
   )
+})
+
+test("completion evidence is extracted only from an explicit [goal:evidence] line", () => {
+  assert.equal(
+    extractCompletionEvidence("Wrapped up.\n[goal:evidence] ran npm test, 83 pass\n[goal:complete]"),
+    "ran npm test, 83 pass",
+  )
+  // Bare markers (no brackets) and a colon separator are accepted.
+  assert.equal(
+    extractCompletionEvidence("goal:evidence: tsc clean\ngoal:complete"),
+    "tsc clean",
+  )
+  // Evidence text may sit on the lines between the markers.
+  assert.equal(
+    extractCompletionEvidence("[goal:evidence]\nlint and tests green\n[goal:complete]"),
+    "lint and tests green",
+  )
+  // No evidence marker → unverified.
+  assert.equal(extractCompletionEvidence("All done!\n[goal:complete]"), "")
+  // Evidence marker present but empty → unverified.
+  assert.equal(extractCompletionEvidence("[goal:evidence]\n[goal:complete]"), "")
+  // No completion marker at all → empty.
+  assert.equal(extractCompletionEvidence("[goal:evidence] did stuff"), "")
 })
 
 test("recognizes session.status idle events alongside deprecated session.idle", () => {
@@ -1240,7 +1264,7 @@ test("plugin reinitialization with a missing state file does not retain stale in
 
 test("[goal:complete] removes goal from state", async () => {
   const { hooks } = await createHooks({
-    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    messages: async () => ({ data: [message("All done!\n[goal:evidence] ran npm test, 83 pass\n[goal:complete]")] }),
     options: { minDelayMs: 1 },
   })
   await hooks["command.execute.before"](
@@ -1294,9 +1318,96 @@ test("[goal:blocked] stops the goal and preserves blocked reason in status", asy
   assert.match(statusOutput.parts[0].text, /Blocked reason: Need the API key first\./)
 })
 
+test("[goal:complete] without evidence is rejected and re-prompts for evidence", async () => {
+  const { calls, hooks } = await createHooks({
+    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    options: { minDelayMs: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-noevidence", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-noevidence", status: { type: "idle" } },
+    },
+  })
+
+  // The completion was not recorded: the goal is still active (not archived).
+  const goal = currentGoal("session-noevidence")
+  assert.ok(goal)
+  assert.equal(goal.stopped, false)
+  // A corrective continuation prompt was sent demanding evidence.
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].body.parts[0].text, /<evidence_required>/)
+  assert.match(calls[0].body.parts[0].text, /no \[goal:evidence\] line/)
+
+  const statusOutput = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-noevidence", arguments: "status" },
+    statusOutput,
+  )
+  assert.match(statusOutput.parts[0].text, /Active goal: ship it/)
+})
+
+test("[goal:complete] with evidence archives and surfaces the evidence in status", async () => {
+  const { hooks } = await createHooks({
+    messages: async () => ({
+      data: [message("Shipped.\n[goal:evidence] npm test green, deployed to staging\n[goal:complete]")],
+    }),
+    options: { minDelayMs: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-evidence", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-evidence", status: { type: "idle" } },
+    },
+  })
+
+  assert.equal(currentGoal("session-evidence"), null)
+
+  const statusOutput = { parts: [] }
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-evidence", arguments: "status" },
+    statusOutput,
+  )
+  assert.match(statusOutput.parts[0].text, /State: achieved/)
+  assert.match(statusOutput.parts[0].text, /Evidence: npm test green, deployed to staging/)
+})
+
+test("[goal:blocked] without a concrete blocker is rejected and continues", async () => {
+  const { calls, hooks } = await createHooks({
+    messages: async () => ({ data: [message("[goal:blocked]")] }),
+    options: { minDelayMs: 1 },
+  })
+  await hooks["command.execute.before"](
+    { command: "goal", sessionID: "session-noblocker", arguments: "ship it" },
+    { parts: [] },
+  )
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "session-noblocker", status: { type: "idle" } },
+    },
+  })
+
+  // Not honored as a real block: the goal keeps running.
+  const goal = currentGoal("session-noblocker")
+  assert.ok(goal)
+  assert.equal(goal.stopped, false)
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].body.parts[0].text, /<evidence_required>/)
+  assert.match(calls[0].body.parts[0].text, /no concrete blocker/)
+})
+
 test("/goal clear removes completed goal status", async () => {
   const { hooks } = await createHooks({
-    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    messages: async () => ({ data: [message("All done!\n[goal:evidence] ran npm test, 83 pass\n[goal:complete]")] }),
     options: { minDelayMs: 1 },
   })
   await hooks["command.execute.before"](
@@ -1324,7 +1435,7 @@ test("/goal clear removes completed goal status", async () => {
 
 test("completed goal results expire after the configured retention window", async () => {
   const { hooks } = await createHooks({
-    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    messages: async () => ({ data: [message("All done!\n[goal:evidence] ran npm test, 83 pass\n[goal:complete]")] }),
     options: { minDelayMs: 1, resultRetentionMs: 1 },
   })
   await hooks["command.execute.before"](
@@ -1350,7 +1461,7 @@ test("completed goal results expire after the configured retention window", asyn
 
 test("maxStoredResults evicts the oldest completed-goal summary", async () => {
   const { hooks } = await createHooks({
-    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    messages: async () => ({ data: [message("All done!\n[goal:evidence] ran npm test, 83 pass\n[goal:complete]")] }),
     options: { minDelayMs: 1, maxStoredResults: 1 },
   })
 
@@ -1762,7 +1873,7 @@ test("persisted state skips malformed entries while keeping valid ones", async (
 
 test("/goal history returns the most recent completed goal history", async () => {
   const { hooks } = await createHooks({
-    messages: async () => ({ data: [message("Done after inspecting src/goal-plugin.js\n\n[goal:complete]")] }),
+    messages: async () => ({ data: [message("Done after inspecting src/goal-plugin.js\n[goal:evidence] node --test passes\n[goal:complete]")] }),
     options: { minDelayMs: 1 },
   })
   await hooks["command.execute.before"](
@@ -2371,7 +2482,9 @@ test("/goal add keeps the previous goal, backgrounds it, and focuses the new one
 
 test("/goal list shows numbered live goals and archived results", async () => {
   const { hooks } = await createHooks({
-    messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+    messages: async () => ({
+      data: [message("All done!\n[goal:evidence] ran the suite, green\n[goal:complete]")],
+    }),
     options: { minDelayMs: 1 },
   })
   const sid = "multi-s2"
@@ -2500,7 +2613,9 @@ test("lifecycle events are written to the ledger and a missing state file recove
   const client = {
     app: { log: async () => {} },
     session: {
-      messages: async () => ({ data: [message("All done!\n\n[goal:complete]")] }),
+      messages: async () => ({
+        data: [message("All done!\n[goal:evidence] verified the build\n[goal:complete]")],
+      }),
       promptAsync: async () => ({}),
     },
   }

@@ -322,6 +322,7 @@ function formatGoalResult(result) {
     `Last checkpoint: ${lastCheckpoint}`,
     `Last status: ${result.lastStatus || "No status recorded."}`,
   ]
+  if (result.evidence) lines.push(`Evidence: ${result.evidence}`)
   if (result.reason) lines.push(`Reason: ${result.reason}`)
   if (result.blockedReason) lines.push(`Blocked reason: ${result.blockedReason}`)
   return lines.join("\n")
@@ -429,11 +430,12 @@ function pruneGoalResults(options) {
   }
 }
 
-function rememberGoalResult(sessionID, goal, state, reason = "") {
+function rememberGoalResult(sessionID, goal, state, reason = "", evidence = "") {
   const result = {
     condition: goal.condition,
     state,
     reason,
+    evidence,
     blockedReason: goal.blockedReason,
     turnCount: goal.turnCount,
     totalTokens: goal.totalTokens,
@@ -727,6 +729,7 @@ function normalizePersistedResult(rawResult) {
     condition: rawResult.condition.trim(),
     state: typeof rawResult.state === "string" && rawResult.state.trim() ? rawResult.state : "unknown",
     reason: typeof rawResult.reason === "string" ? rawResult.reason : "",
+    evidence: typeof rawResult.evidence === "string" ? rawResult.evidence : "",
     blockedReason: typeof rawResult.blockedReason === "string" ? rawResult.blockedReason : "",
     turnCount: toNonNegativeInteger(rawResult.turnCount),
     totalTokens: toNonNegativeInteger(rawResult.totalTokens),
@@ -1107,6 +1110,7 @@ const STRUCTURAL_TAGS = [
   "budget_wrapup",
   "next_step",
   "completion_audit",
+  "evidence_required",
 ]
 const STRUCTURAL_OPEN_TAG_RE = new RegExp(`<(${STRUCTURAL_TAGS.join("|")})\\b`, "gi")
 
@@ -1157,7 +1161,10 @@ function buildGoalBlock(goal) {
   return lines.join("\n")
 }
 
-function buildContinueMessage(goal, { budgetWrapup = false } = {}) {
+function buildContinueMessage(
+  goal,
+  { budgetWrapup = false, completionUnverified = false, blockerUnstated = false } = {},
+) {
   const remainingTokens = Math.max(0, goal.options.maxTokens - goal.totalTokens)
   const remainingTurns = Math.max(0, goal.options.maxTurns - goal.turnCount)
   const elapsedSeconds = Math.round((Date.now() - goal.startedAt) / 1000)
@@ -1200,11 +1207,36 @@ function buildContinueMessage(goal, { budgetWrapup = false } = {}) {
     "Before outputting [goal:complete], treat completion as unproven.",
     "Verify the result against the goal objective and the current project state.",
     "Only mark complete when every requirement is satisfied and any relevant checks have passed or their absence is explicitly justified.",
-    "If user input is required, explain the specific blocker in the line immediately before [goal:blocked].",
+    "When you do mark complete, put a line beginning with [goal:evidence] immediately before [goal:complete], summarizing what you verified (commands run and their results, files checked). A [goal:complete] without a [goal:evidence] line is rejected and not recorded.",
+    "If user input is required, explain the specific blocker in the line immediately before [goal:blocked]. A [goal:blocked] without a concrete blocker is rejected.",
     "</completion_audit>",
+  )
+
+  if (completionUnverified) {
+    lines.push(
+      "",
+      "<evidence_required>",
+      "Your previous turn ended with [goal:complete] but included no [goal:evidence] line, so the completion was REJECTED and not recorded.",
+      "Do not output [goal:complete] again until the goal is truly finished and verified.",
+      "When it is, put a line starting with [goal:evidence] (summarizing the checks you ran and their results) immediately before [goal:complete].",
+      "</evidence_required>",
+    )
+  }
+
+  if (blockerUnstated) {
+    lines.push(
+      "",
+      "<evidence_required>",
+      "Your previous turn ended with [goal:blocked] but stated no concrete blocker, so it was REJECTED.",
+      "If you are truly blocked, state the specific blocker — what you need from the user and why you cannot proceed — on the line immediately before [goal:blocked]. Otherwise keep working.",
+      "</evidence_required>",
+    )
+  }
+
+  lines.push(
     "",
-    "End with [goal:complete] only when the goal is fully satisfied.",
-    "End with [goal:blocked] only if user input is required.",
+    "End with [goal:complete] (preceded by a [goal:evidence] line) only when the goal is fully satisfied.",
+    "End with [goal:blocked] (preceded by a concrete blocker) only if user input is required.",
     buildLimitWarning(goal),
     "</goal_continuation>",
   )
@@ -1248,7 +1280,7 @@ function buildCompactionContext(goal) {
     `Auto-continues used: ${goal.turnCount}/${goal.options.maxTurns}. Context tokens: ${goal.totalTokens}/${goal.options.maxTokens}. Elapsed: ${elapsedSeconds}s.`,
     goal.lastCheckpoint ? `Latest checkpoint: ${goal.lastCheckpoint.summary}` : null,
     ...buildCompactionProgressSummary(goal),
-    "After compaction, continue from the next concrete unfinished step while the goal is active. Verify the result against the goal objective before ending; output [goal:complete] only when fully satisfied, or [goal:blocked] only if user input is required.",
+    "After compaction, continue from the next concrete unfinished step while the goal is active. Verify the result against the goal objective before ending; output [goal:complete] (preceded by a [goal:evidence] line) only when fully satisfied, or [goal:blocked] (preceded by a concrete blocker) only if user input is required.",
   ]
     .filter(Boolean)
     .join("\n")
@@ -1265,6 +1297,37 @@ function extractBlockedReason(text) {
     .slice(0, markerIndex)
     .reverse()
     .find((line) => line.trim())?.trim() || ""
+}
+
+// Completion integrity: a `[goal:complete]` is only honored when the assistant
+// also supplies an explicit `[goal:evidence] <text>` line substantiating it.
+// Evidence text may follow the marker on the same line, or sit on the lines
+// between the evidence marker and the completion marker. Returns "" when no
+// non-empty evidence is present, which makes the completion claim unverified.
+function extractCompletionEvidence(text) {
+  const lines = text.trimEnd().split("\n")
+  const markerIndex = lines.findIndex((line) => {
+    const trimmed = line.trim().toLowerCase()
+    return trimmed === "[goal:complete]" || trimmed === "goal:complete"
+  })
+  if (markerIndex < 0) return ""
+
+  for (let i = markerIndex - 1; i >= 0; i -= 1) {
+    const raw = lines[i].trim()
+    if (!raw) continue
+    const match = raw.match(/^\[?\s*goal:evidence\s*\]?[:\-\s]*(.*)$/i)
+    if (!match) continue
+    const inline = match[1].trim()
+    if (inline) return inline
+    const following = lines
+      .slice(i + 1, markerIndex)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join(" ")
+      .trim()
+    return following
+  }
+  return ""
 }
 
 function formatArgumentErrors(errors) {
@@ -1777,8 +1840,8 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             goal.mode !== "normal" ? `Mode: ${goal.mode}` : null,
             "",
             "Start working toward this goal now.",
-            "When the goal is fully satisfied, end your response with `[goal:complete]`.",
-            "If you are truly blocked and need the user, end with `[goal:blocked]`.",
+            "When the goal is fully satisfied, summarize your evidence on a line starting with `[goal:evidence]`, then end your response with `[goal:complete]`. A `[goal:complete]` without a `[goal:evidence]` line is rejected and not recorded.",
+            "If you are truly blocked and need the user, state the concrete blocker on the line immediately before `[goal:blocked]`.",
             `Use \`/${commandName} history\` to inspect recent lifecycle events and checkpoints.`,
             "",
             `Limits: ${goal.options.maxTurns} auto-continues, ${Math.round(
@@ -1866,29 +1929,57 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         activeGoalAfterMessages.lastAssistantText = latestText
         activeGoalAfterMessages.lastAssistantMessageID = latestAssistantID
 
-        if (goalIsComplete(latestText)) {
-          activeGoalAfterMessages.lastStatus = "Goal completed."
-          // pushHistory writes the terminal event to the durable ledger first,
-          // so even if the state write below fails the completion is recoverable.
-          pushHistory(activeGoalAfterMessages, "completed", "Assistant marked the goal complete.")
-          rememberGoalResult(sessionID, activeGoalAfterMessages, "achieved")
-          cleanupGoal(sessionID)
-          await persistTerminalState("completion")
-          return
-        }
+        // Completion/blocked integrity gate: a [goal:complete] is only archived
+        // when accompanied by an explicit [goal:evidence] line, and a
+        // [goal:blocked] is only honored with a concrete blocker. An
+        // unsubstantiated claim is rejected and the goal keeps running with a
+        // corrective continuation prompt (these flags drive that prompt below).
+        let completionUnverified = false
+        let blockerUnstated = false
 
-        if (goalIsBlocked(latestText)) {
-          activeGoalAfterMessages.blockedReason = extractBlockedReason(latestText)
-          activeGoalAfterMessages.lastStatus = "Assistant reported blocked."
-          activeGoalAfterMessages.stopped = true
-          activeGoalAfterMessages.stopReason = "blocked"
+        if (goalIsComplete(latestText)) {
+          const evidence = extractCompletionEvidence(latestText)
+          if (evidence) {
+            activeGoalAfterMessages.lastStatus = "Goal completed."
+            // pushHistory writes the terminal event to the durable ledger first,
+            // so the completion survives even if the state write below fails.
+            pushHistory(
+              activeGoalAfterMessages,
+              "completed",
+              `Assistant marked the goal complete with evidence: ${summarizeText(evidence, 400)}`,
+            )
+            rememberGoalResult(sessionID, activeGoalAfterMessages, "achieved", "", evidence)
+            cleanupGoal(sessionID)
+            await persistTerminalState("completion")
+            return
+          }
+          completionUnverified = true
+          activeGoalAfterMessages.lastStatus =
+            "Rejected [goal:complete]: no [goal:evidence] line provided. Completion not recorded; re-prompting for evidence."
           pushHistory(
             activeGoalAfterMessages,
-            "blocked",
-            activeGoalAfterMessages.blockedReason || "Assistant reported blocked and requested user input.",
+            "completion-unverified",
+            "Assistant output [goal:complete] without a [goal:evidence] line; completion rejected, continuing.",
           )
-          await persistTerminalState("blocked")
-          return
+        } else if (goalIsBlocked(latestText)) {
+          const reason = extractBlockedReason(latestText)
+          if (reason) {
+            activeGoalAfterMessages.blockedReason = reason
+            activeGoalAfterMessages.lastStatus = "Assistant reported blocked."
+            activeGoalAfterMessages.stopped = true
+            activeGoalAfterMessages.stopReason = "blocked"
+            pushHistory(activeGoalAfterMessages, "blocked", reason)
+            await persistTerminalState("blocked")
+            return
+          }
+          blockerUnstated = true
+          activeGoalAfterMessages.lastStatus =
+            "Rejected [goal:blocked]: no concrete blocker stated. Re-prompting for the specific blocker."
+          pushHistory(
+            activeGoalAfterMessages,
+            "blocker-unstated",
+            "Assistant output [goal:blocked] without a concrete blocker line; rejected, continuing.",
+          )
         }
 
         const limitReason = stopReason(activeGoalAfterMessages)
@@ -1969,16 +2060,28 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         activeGoalBeforePrompt.turnCount += 1
         activeGoalBeforePrompt.lastContinueAt = Date.now()
         if (!budgetWrapup) {
-          activeGoalBeforePrompt.lastStatus = latestText
-            ? `Continuing after assistant turn ${activeGoalBeforePrompt.turnCount}.`
-            : `Continuing after idle event ${activeGoalBeforePrompt.turnCount}.`
+          if (completionUnverified) {
+            activeGoalBeforePrompt.lastStatus = `Rejected an unverified [goal:complete] (no [goal:evidence]); re-prompting for evidence on turn ${activeGoalBeforePrompt.turnCount}.`
+          } else if (blockerUnstated) {
+            activeGoalBeforePrompt.lastStatus = `Rejected a [goal:blocked] with no concrete blocker; re-prompting on turn ${activeGoalBeforePrompt.turnCount}.`
+          } else {
+            activeGoalBeforePrompt.lastStatus = latestText
+              ? `Continuing after assistant turn ${activeGoalBeforePrompt.turnCount}.`
+              : `Continuing after idle event ${activeGoalBeforePrompt.turnCount}.`
+          }
         }
 
         const response = await client.session.promptAsync({
           path: { id: sessionID },
           body: {
             parts: [
-              makeTextPart(buildContinueMessage(activeGoalBeforePrompt, { budgetWrapup })),
+              makeTextPart(
+                buildContinueMessage(activeGoalBeforePrompt, {
+                  budgetWrapup,
+                  completionUnverified,
+                  blockerUnstated,
+                }),
+              ),
             ],
           },
         })
@@ -2043,8 +2146,8 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
       const goalBlock = [
         buildGoalBlock(goal),
         "Keep working until the goal is fully satisfied.",
-        "When fully satisfied, end the response with `[goal:complete]`.",
-        "If user input is required, explain the blocker in the line immediately before `[goal:blocked]`.",
+        "When fully satisfied, put a `[goal:evidence]` line summarizing what you verified immediately before `[goal:complete]`. A `[goal:complete]` without evidence is rejected.",
+        "If user input is required, explain the concrete blocker in the line immediately before `[goal:blocked]`. A `[goal:blocked]` without a concrete blocker is rejected.",
         buildLimitWarning(goal),
       ].filter(Boolean).join("\n")
 
@@ -2120,6 +2223,7 @@ export const testInternals = {
   escapeGoalText,
   totalTokensForMessage,
   extractBlockedReason,
+  extractCompletionEvidence,
   findLatestAssistantMessage,
   formatArgumentErrors,
   formatStatus,

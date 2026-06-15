@@ -118,20 +118,26 @@ A session can hold more than one goal. `/goal <condition>` replaces the focused 
 2. Each time the session goes idle, the plugin sends a continuation prompt containing the goal, the remaining budget, and a completion audit asking the assistant to verify the current state before declaring done.
 3. The plugin stops auto-continuing when the assistant ends a response with `[goal:complete]` or `[goal:blocked]`, or when a safety limit is reached.
 4. If OpenCode compacts the session, the plugin injects a deterministic summary into the compaction context so the goal survives the compaction and the assistant keeps the thread. The summary — objective, status, budget usage, recent checkpoints, and recent lifecycle events — is reconstructed from the plugin's persisted goal record rather than from chat memory, so it is stable and reproducible. While a goal is active, the plugin also disables OpenCode's generic post-compaction auto-continue so it does not race the plugin's own continuation.
+3. The plugin stops auto-continuing when the assistant ends a response with a substantiated `[goal:complete]` or `[goal:blocked]`, or when a safety limit is reached. A `[goal:complete]` is only honored when it is preceded by a `[goal:evidence]` line; a `[goal:blocked]` is only honored when a concrete blocker is stated. Unsubstantiated claims are rejected and the plugin re-prompts for the missing evidence or blocker.
+4. If OpenCode compacts the session, the plugin injects the goal objective, budget usage, and latest checkpoint into the compaction context so the goal survives the compaction and the assistant keeps the thread. While a goal is active, the plugin also disables OpenCode's generic post-compaction auto-continue so it does not race the plugin's own continuation.
 
 ## Completion markers
 
 The plugin stops when it sees one of these at the end of an assistant response:
 
 ```
+[goal:evidence] ran npm test (83 passing), verified the build output
 [goal:complete]
+```
+```
+The deploy step needs a production API token I don't have.
 [goal:blocked]
 ```
 
-`[goal:complete]` — goal is satisfied.
-`[goal:blocked]` — the assistant needs input from you. The line immediately before the marker explains the specific blocker; `/goal status` shows it while the goal remains in memory.
+`[goal:complete]` — goal is satisfied. It is **only honored when the line immediately before it (or an earlier line) begins with `[goal:evidence]` and contains a non-empty summary** of what was verified (commands run and their results, files checked). A `[goal:complete]` with no `[goal:evidence]` line is rejected, not recorded, and the plugin re-prompts for evidence. The accepted evidence is shown in `/goal status` after completion.
+`[goal:blocked]` — the assistant needs input from you. The line immediately before the marker must explain the specific blocker; `/goal status` shows it while the goal remains in memory. A `[goal:blocked]` with no concrete blocker is rejected and the plugin keeps working.
 
-Markers must appear on their own final line. The bracketed form is canonical, but the plugin also accepts bare `goal:complete` and `goal:blocked` final lines because some models omit brackets. Natural-language phrases like "goal complete" are intentionally ignored.
+Markers must appear on their own final line. The bracketed form is canonical, but the plugin also accepts bare `goal:complete`, `goal:blocked`, and `goal:evidence` lines because some models omit brackets. Natural-language phrases like "goal complete" are intentionally ignored.
 
 ## Safety limits
 

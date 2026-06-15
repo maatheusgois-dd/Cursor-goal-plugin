@@ -1579,6 +1579,25 @@ function formatGoalList(sessionID) {
   return lines.join("\n")
 }
 
+// Visible audit messages (item 2.4): when the plugin audits a completion or
+// blocker it announces the audit and its result instead of doing the work
+// silently. Delivery is via this default messenger (structured app log, the
+// channel OpenCode surfaces to the user) or a caller-supplied `auditMessenger`
+// — the integration point for routing audit notices into the live conversation
+// once a non-prompting message API is available.
+async function defaultAuditMessenger(client, sessionID, text) {
+  if (client?.app?.log) {
+    await client.app.log({
+      body: {
+        service: "opencode-goal-plugin",
+        level: "info",
+        message: text,
+        extra: { sessionID, kind: "goal-audit" },
+      },
+    })
+  }
+}
+
 export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
   const defaultGoalOptions = normalizeOptions(pluginOptions)
   const persistenceOptions = normalizePersistenceOptions(pluginOptions)
@@ -1605,6 +1624,21 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
     setLedgerSink((entry) => appendLedgerLine(persistenceOptions.ledgerFilePath, entry))
   } else {
     setLedgerSink(null)
+  }
+
+  // Visible audit announcements (item 2.4).
+  const auditMessagesEnabled = pluginOptions.auditMessages !== false
+  const auditMessenger =
+    typeof pluginOptions.auditMessenger === "function"
+      ? pluginOptions.auditMessenger
+      : (sessionID, text) => defaultAuditMessenger(client, sessionID, text)
+  const announceAudit = async (sessionID, text) => {
+    if (!auditMessagesEnabled) return
+    try {
+      await auditMessenger(sessionID, text)
+    } catch (error) {
+      await logPluginError(client, "Failed to deliver goal audit message", error)
+    }
   }
 
   clearRuntimeState()
@@ -2016,6 +2050,10 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         if (goalIsComplete(latestText)) {
           const evidence = extractCompletionEvidence(latestText)
           if (evidence) {
+            await announceAudit(
+              sessionID,
+              `Auditing goal completion: verifying "${summarizeText(activeGoalAfterMessages.condition, 120)}" is satisfied before archiving.`,
+            )
             activeGoalAfterMessages.lastStatus = "Goal completed."
             // pushHistory writes the terminal event to the durable ledger first,
             // so the completion survives even if the state write below fails.
@@ -2027,6 +2065,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
             rememberGoalResult(sessionID, activeGoalAfterMessages, "achieved", "", evidence)
             cleanupGoal(sessionID)
             await persistTerminalState("completion")
+            await announceAudit(sessionID, "Audit result: completion accepted — goal archived as achieved.")
             return
           }
           completionUnverified = true
@@ -2040,12 +2079,20 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         } else if (goalIsBlocked(latestText)) {
           const reason = extractBlockedReason(latestText)
           if (reason) {
+            await announceAudit(
+              sessionID,
+              `Auditing goal blocker: the assistant reported it is blocked on "${summarizeText(activeGoalAfterMessages.condition, 120)}".`,
+            )
             activeGoalAfterMessages.blockedReason = reason
             activeGoalAfterMessages.lastStatus = "Assistant reported blocked."
             activeGoalAfterMessages.stopped = true
             activeGoalAfterMessages.stopReason = "blocked"
             pushHistory(activeGoalAfterMessages, "blocked", reason)
             await persistTerminalState("blocked")
+            await announceAudit(
+              sessionID,
+              `Audit result: goal paused as blocked — ${summarizeText(reason, 160)}. Run /goal resume after addressing it.`,
+            )
             return
           }
           blockerUnstated = true
@@ -2325,6 +2372,7 @@ export const testInternals = {
   reconstructGoalsFromLedger,
   ledgerPathFor,
   setLedgerSink,
+  defaultAuditMessenger,
   buildLimitWarning,
   buildCompactionContext,
   buildCompactionProgressSummary,

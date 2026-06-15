@@ -251,6 +251,10 @@ Additional plugin-level options:
 - `resultRetentionMs` — how long a completed goal summary remains available through `/goal status` after the goal leaves active memory.
 - `maxStoredResults` — maximum number of completed-goal summaries retained in process memory before the oldest ones are evicted.
 
+## Audit messages
+
+When the assistant marks a goal complete or blocked, the plugin announces the audit instead of doing it silently: an audit-start message ("Auditing goal completion…") and an audit-result message ("completion accepted — goal archived" / "paused as blocked — …"). By default these are delivered through OpenCode's structured log (`client.app.log`, visible to the user). Provide an `auditMessenger(sessionID, text)` plugin option to route them elsewhere (for example into the live conversation once a suitable message API is available), or set `auditMessages: false` to disable them.
+
 ## Prompt safety
 
 The goal text is wrapped in `<goal_objective>` tags and labeled as user-provided task data. The assistant is told to treat it as a task description, not as elevated instructions that can override system, developer, tool, or repository policies.

@@ -17,6 +17,7 @@ const DEFAULT_OPTIONS = {
   maxRecentMessages: 50,
   noProgressTokenThreshold: 50,
   noProgressTurnsBeforePause: 2,
+  noToolCallTurnsBeforePause: 2,
   budgetWrapupRatio: 0.8,
   warnTurnsRemaining: 3,
   warnDurationMsRemaining: 60 * 1000,
@@ -65,6 +66,23 @@ const GOAL_FLAG_SPECS = {
     parse: (value, options) =>
       toPositiveInteger(value, options.noProgressTurnsBeforePause),
   },
+  "--no-tool-turns": {
+    optionKey: "noToolCallTurnsBeforePause",
+    parse: (value, options) =>
+      toPositiveInteger(value, options.noToolCallTurnsBeforePause),
+  },
+}
+
+// OpenCode message parts are a discriminated union tagged by `type`. A tool
+// invocation is a `tool` part (subtask delegations and legacy `tool-invocation`
+// shapes count as tool-using turns too). A continuation turn with none of these
+// is "talk only" — a signal of a self-chat loop the auto-continue should not
+// keep feeding.
+const TOOL_PART_TYPES = new Set(["tool", "tool-invocation", "subtask"])
+
+function messageHasToolCall(message) {
+  const parts = Array.isArray(message?.parts) ? message.parts : []
+  return parts.some((part) => part && TOOL_PART_TYPES.has(part.type))
 }
 
 function getText(parts) {
@@ -271,6 +289,7 @@ function resetGoalBudget(goal) {
   goal.lastContinueAt = 0
   goal.lastProgressAt = 0
   goal.noProgressTurns = 0
+  goal.noToolCallTurns = 0
   goal.budgetWrapupSent = false
   goal.messageIDs = new Set()
   goal.promptFailures = 0
@@ -331,6 +350,10 @@ function normalizeOptions(options = {}) {
     noProgressTurnsBeforePause: toPositiveInteger(
       options.noProgressTurnsBeforePause,
       DEFAULT_OPTIONS.noProgressTurnsBeforePause,
+    ),
+    noToolCallTurnsBeforePause: toPositiveInteger(
+      options.noToolCallTurnsBeforePause,
+      DEFAULT_OPTIONS.noToolCallTurnsBeforePause,
     ),
     budgetWrapupRatio:
       Number(options.budgetWrapupRatio) > 0 && Number(options.budgetWrapupRatio) < 1
@@ -437,6 +460,7 @@ function normalizePersistedGoal(rawGoal) {
     lastContinueAt: toNonNegativeInteger(rawGoal.lastContinueAt),
     lastProgressAt: toNonNegativeInteger(rawGoal.lastProgressAt),
     noProgressTurns: toNonNegativeInteger(rawGoal.noProgressTurns),
+    noToolCallTurns: toNonNegativeInteger(rawGoal.noToolCallTurns),
     blockedReason: typeof rawGoal.blockedReason === "string" ? rawGoal.blockedReason : "",
     budgetWrapupSent: rawGoal.budgetWrapupSent === true,
     stopped: rawGoal.stopped === true,
@@ -819,7 +843,7 @@ function formatArgumentErrors(errors) {
     "Goal flags could not be parsed.",
     ...errors.map((error) => `- ${error}`),
     "",
-    "Supported flags: --max-turns, --max-minutes, --max-duration-ms, --max-tokens, --cooldown-ms, --no-progress-threshold, --no-progress-turns.",
+    "Supported flags: --max-turns, --max-minutes, --max-duration-ms, --max-tokens, --cooldown-ms, --no-progress-threshold, --no-progress-turns, --no-tool-turns.",
     "You can pass them as `--flag value` or `--flag=value`.",
   ].join("\n")
 }
@@ -1114,6 +1138,7 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
         lastContinueAt: 0,
         lastProgressAt: 0,
         noProgressTurns: 0,
+        noToolCallTurns: 0,
         blockedReason: "",
         budgetWrapupSent: false,
         stopped: false,
@@ -1307,6 +1332,43 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           activeGoalAfterMessages.noProgressTurns = 0
         }
 
+        // No-tool-call gate: a continuation turn (turnCount > 0) that produced
+        // an assistant message with no tool calls is "talk only". Repeated
+        // talk-only turns indicate a self-chat loop, so pause after the
+        // configured grace window. Complements the low-output check above:
+        // a turn can be high-output yet still make no real progress because it
+        // never touched a tool.
+        const latestHasToolCall = messageHasToolCall(latestAssistant)
+        const noToolCallContinuation =
+          activeGoalAfterMessages.turnCount > 0 && Boolean(latestAssistant) && !latestHasToolCall
+        if (noToolCallContinuation) {
+          activeGoalAfterMessages.noToolCallTurns += 1
+          if (
+            activeGoalAfterMessages.noToolCallTurns >=
+            activeGoalAfterMessages.options.noToolCallTurnsBeforePause
+          ) {
+            activeGoalAfterMessages.stopped = true
+            activeGoalAfterMessages.stopReason = "no tool calls"
+            activeGoalAfterMessages.lastStatus = `Goal auto-continue paused after ${activeGoalAfterMessages.noToolCallTurns} continuation turn(s) with no tool calls (possible self-chat loop). Run /goal resume to continue.`
+            pushHistory(
+              activeGoalAfterMessages,
+              "paused",
+              `Paused after ${activeGoalAfterMessages.noToolCallTurns} continuation turn(s) that produced no tool calls.`,
+            )
+            await persist()
+            return
+          }
+
+          activeGoalAfterMessages.lastStatus = `Continuation turn produced no tool calls (${activeGoalAfterMessages.noToolCallTurns}/${activeGoalAfterMessages.options.noToolCallTurnsBeforePause}); monitoring for another before pausing.`
+          pushHistory(
+            activeGoalAfterMessages,
+            "warning",
+            `Observed a continuation turn with no tool calls; grace count ${activeGoalAfterMessages.noToolCallTurns}/${activeGoalAfterMessages.options.noToolCallTurnsBeforePause}.`,
+          )
+        } else if (latestHasToolCall) {
+          activeGoalAfterMessages.noToolCallTurns = 0
+        }
+
         const elapsedSinceLastContinue = Date.now() - activeGoalAfterMessages.lastContinueAt
         if (
           activeGoalAfterMessages.lastContinueAt &&
@@ -1471,6 +1533,7 @@ export const testInternals = {
   goalIsBlocked,
   goalIsComplete,
   isIdleEvent,
+  messageHasToolCall,
   normalizeOptions,
   outputTokensForMessage,
   parseGoalArguments,

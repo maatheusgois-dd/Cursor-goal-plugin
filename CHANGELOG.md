@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Pause auto-continue on repeated tool-free continuation turns (no-tool-call gate).** Complementing the existing low-output no-progress check, the plugin now tracks continuation turns that produce an assistant message with no tool calls (OpenCode `tool` / `subtask` parts). After `noToolCallTurnsBeforePause` consecutive tool-free continuation turns (default `2`) it pauses with stop reason `no tool calls`, guarding against self-chat loops where the assistant talks without doing work. A turn that uses any tool resets the counter. Configurable via the `noToolCallTurnsBeforePause` plugin option and the `--no-tool-turns <n>` per-goal flag; the counter is persisted and reset by `/goal resume`. New `messageHasToolCall` helper plus unit and handler tests. Implements megalist item 5.1.
+
 ## 0.2.0 — 2026-06-14
 
 - **Add `/goal edit <new objective>`.** Revise the active goal's objective in place while preserving its turn/token/time budget and lifecycle history. Any pause/blocked state is cleared and `noProgressTurns` resets so the revised goal can continue; a goal already at a hard limit re-pauses on the next idle (use `/goal resume` for a fresh budget window). Ported from prevalentWare/opencode-goal-plugin's `update_goal_objective` tool, adapted to the marker-based command model.

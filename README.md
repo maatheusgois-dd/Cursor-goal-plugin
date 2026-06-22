@@ -256,10 +256,27 @@ Additional plugin-level options:
 - `warnTurnsRemaining` / `warnDurationMsRemaining` / `warnTokensRemaining` — thresholds at which the auto-continue prompt appends a "limits are near" warning (default `3` turns, `60000` ms, `25000` context tokens). Lower them to warn closer to the limit, or raise them to warn earlier.
 - `commandName` — the slash command the plugin owns (default `goal`). Set it to e.g. `objective` to drive the workflow with `/objective` instead of `/goal`; a leading slash is tolerated. Remember to register the matching command name in your OpenCode `command` config. User-facing hints (`/goal status`, `/goal resume`, …) follow the configured name.
 - `registerCommand` — whether the plugin installs its `command.execute.before` hook at all (default `true`). Set it to `false` if you only want the auto-continue/persistence behavior driven programmatically and don't want the plugin to own a slash command.
+- `registerTools` — whether the plugin registers the agent-facing goal tools (default `true`). Requires the optional `@opencode-ai/plugin` peer dependency to be present; when it is absent, tool registration is skipped and the command/event hooks still work. Set to `false` to omit the programmatic tool surface entirely. See [Agent tools](#agent-tools-optional).
 - `persistState` — whether to persist active goals and recent goal results to disk.
 - `stateFilePath` — where the persisted state JSON is written. Overrides the default project-local path and the `OPENCODE_GOAL_STATE_PATH` env var. Useful if you want a fixed or ephemeral location. When unset, the default is `<cwd>/.opencode/goals/state.json` (see the persistence section above), and `OPENCODE_GOAL_STATE_PATH` can override it without editing config.
 - `resultRetentionMs` — how long a completed goal summary remains available through `/goal status` after the goal leaves active memory.
 - `maxStoredResults` — maximum number of completed-goal summaries retained in process memory before the oldest ones are evicted.
+
+## Agent tools (optional)
+
+In addition to the `/goal` command, the plugin can expose the same workflow to the model as callable tools, so the agent can inspect and manage the goal itself. This requires the optional `@opencode-ai/plugin` peer dependency (it provides the `tool` helper and schema). When that package isn't installed the tools are simply not registered and everything else keeps working. Disable them explicitly with `registerTools: false`.
+
+Registered tools:
+
+- `get_goal` — current goal status (objective, budget usage, latest checkpoint).
+- `get_goal_history` — lifecycle history and latest checkpoint.
+- `set_goal` — set/replace the session goal. Its description constrains the agent to call it **only when the user explicitly asks** to set a goal. Accepts `objective` plus optional `maxTurns`, `maxTokens`, `maxDurationMs`, `successCriteria`, `constraints`, and `mode`.
+- `update_goal` — revise the `objective` and/or set `status` to `complete` / `blocked` / `paused` / `resumed` (with `evidence` for complete or `blocker` for blocked).
+- `clear_goal` — clear the current goal and discard its saved status.
+
+These operate on the same per-session multi-goal state as the command path: a tool-set goal persists, shows up in `/goal list`, and is driven by the idle auto-continue; completing a goal in an ordered (sisyphus) sequence auto-promotes the next.
+
+> Integration note: the tool execute-context shape (`ctx.sessionID`) and the `tool.schema` surface follow the OpenCode plugin docs. The tool **logic** is unit-tested independently, but the live registration should be confirmed against a real OpenCode run (see the smoke-test checklist).
 
 ## Audit messages
 

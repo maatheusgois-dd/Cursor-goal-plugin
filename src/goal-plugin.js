@@ -1590,6 +1590,240 @@ function buildGoalState(sessionID, condition, options, meta = {}, lastStatus = "
   }
 }
 
+const AGENT_UPDATE_STATUSES = new Set(["complete", "blocked", "paused", "resumed"])
+
+// Programmatic equivalents of the /goal command, exposed to the agent as tools
+// (megalist items 7.1 / 7.2). Each handler operates on a session id and mutates
+// the same in-memory state the command path uses, persisting through the
+// provided `persist` callback, and returns a human-readable string for the tool
+// result. Goal creation/replacement routes through the multi-goal registry
+// (buildGoalState + registerSessionGoal + focusGoal) exactly like the command
+// path, so tool-created goals persist and are driven by the idle handler.
+function buildAgentToolHandlers({ defaultGoalOptions, persist }) {
+  async function getGoal(sessionID) {
+    const goal = goalStates.get(sessionID)
+    if (goal) return formatStatus(goal)
+    const lastResult = lastGoalResults.get(sessionID)
+    if (lastResult) return formatGoalResult(lastResult)
+    return "No active goal."
+  }
+
+  async function getGoalHistory(sessionID) {
+    const goal = goalStates.get(sessionID)
+    if (goal) {
+      return [
+        `Goal history for: ${goal.condition}`,
+        "",
+        `Latest checkpoint: ${goal.lastCheckpoint?.summary || "none yet"}`,
+        "",
+        formatHistory(goal.history),
+      ].join("\n")
+    }
+    const lastResult = lastGoalResults.get(sessionID)
+    if (lastResult) {
+      return [
+        `Last goal history for: ${lastResult.condition}`,
+        "",
+        `Latest checkpoint: ${lastResult.lastCheckpoint?.summary || "none recorded"}`,
+        "",
+        formatHistory(lastResult.history),
+      ].join("\n")
+    }
+    return "No goal history recorded yet."
+  }
+
+  async function setGoal(sessionID, args = {}) {
+    const objective = typeof args.objective === "string" ? args.objective.trim() : ""
+    if (!objective) return "No objective provided. Pass a non-empty `objective`."
+
+    const options = normalizeOptions({
+      ...defaultGoalOptions,
+      ...(Number.isFinite(args.maxTurns) ? { maxTurns: args.maxTurns } : {}),
+      ...(Number.isFinite(args.maxTokens) ? { maxTokens: args.maxTokens } : {}),
+      ...(Number.isFinite(args.maxDurationMs) ? { maxDurationMs: args.maxDurationMs } : {}),
+    })
+    const meta = {
+      successCriteria: typeof args.successCriteria === "string" ? args.successCriteria : "",
+      constraints: typeof args.constraints === "string" ? args.constraints : "",
+      mode: typeof args.mode === "string" ? args.mode : "normal",
+    }
+    const goal = buildGoalState(sessionID, objective, options, meta)
+    pushHistory(
+      goal,
+      "set",
+      `Goal created via agent tool with limits: ${options.maxTurns} auto-continues, ${Math.round(options.maxDurationMs / 1000)}s, ${options.maxTokens.toLocaleString()} context tokens.`,
+    )
+    // Mirror the `/goal <condition>` replace path: discard the focused goal and
+    // its saved result, drop any ordered sequence, then register + focus the new
+    // goal so it persists and the idle handler drives it.
+    sessionOrdered.delete(sessionID)
+    cleanupGoal(sessionID)
+    lastGoalResults.delete(sessionID)
+    registerSessionGoal(goal)
+    focusGoal(sessionID, goal)
+    await persist()
+    return `New active goal: ${goal.condition}`
+  }
+
+  async function updateGoal(sessionID, args = {}) {
+    const goal = goalStates.get(sessionID)
+    if (!goal) return "No active goal to update. Use set_goal first."
+
+    const messages = []
+
+    if (typeof args.objective === "string" && args.objective.trim()) {
+      goal.condition = args.objective.trim()
+      goal.stopped = false
+      goal.stopReason = ""
+      goal.blockedReason = ""
+      goal.budgetWrapupSent = false
+      goal.noProgressTurns = 0
+      goal.lastStatus = "Goal objective updated."
+      pushHistory(goal, "edited", `Objective updated to: ${summarizeText(goal.condition, 400)}`)
+      messages.push(`Objective updated: ${goal.condition}`)
+    }
+
+    if (args.status !== undefined) {
+      const status = String(args.status).trim().toLowerCase()
+      if (!AGENT_UPDATE_STATUSES.has(status)) {
+        return `Invalid status: ${args.status} (expected complete, blocked, paused, or resumed).`
+      }
+      if (status === "complete") {
+        const evidence = typeof args.evidence === "string" ? args.evidence.trim() : ""
+        goal.lastStatus = "Goal completed."
+        pushHistory(
+          goal,
+          "completed",
+          evidence ? `Marked complete via tool: ${summarizeText(evidence, 400)}` : "Marked complete via agent tool.",
+        )
+        rememberGoalResult(sessionID, goal, "achieved", "", evidence)
+        cleanupGoal(sessionID)
+        // Advance an ordered (sisyphus) sequence just like the marker path does.
+        if (sessionOrdered.has(sessionID)) promoteNextOrderedGoal(sessionID)
+        await persist()
+        return "Goal marked complete and archived."
+      }
+      if (status === "blocked") {
+        goal.blockedReason = typeof args.blocker === "string" ? args.blocker.trim() : ""
+        goal.stopped = true
+        goal.stopReason = "blocked"
+        goal.lastStatus = "Assistant reported blocked."
+        pushHistory(goal, "blocked", goal.blockedReason || "Marked blocked via agent tool.")
+        messages.push("Goal marked blocked.")
+      } else if (status === "paused") {
+        goal.stopped = true
+        goal.stopReason = "paused"
+        goal.lastStatus = "Goal paused."
+        pushHistory(goal, "paused", "Paused via agent tool.")
+        messages.push("Goal paused.")
+      } else if (status === "resumed") {
+        const previousGoalId = goal.goalId
+        resetGoalBudget(goal)
+        // resetGoalBudget rotates goalId; re-key the registry so the goal stays
+        // findable by its new id (the focused pointer holds the same object).
+        if (goal.goalId !== previousGoalId) {
+          removeSessionGoal(sessionID, previousGoalId)
+          registerSessionGoal(goal)
+          focusGoal(sessionID, goal)
+        }
+        goal.stopped = false
+        goal.stopReason = ""
+        goal.blockedReason = ""
+        goal.lastStatus = "Goal resumed with a fresh local budget."
+        pushHistory(goal, "resumed", "Resumed via agent tool with a fresh local budget window.")
+        messages.push("Goal resumed with fresh limits.")
+      }
+    }
+
+    if (!messages.length) {
+      return "Nothing to update. Provide `objective` and/or `status`."
+    }
+    await persist()
+    return messages.join(" ")
+  }
+
+  async function clearGoal(sessionID) {
+    // Mirror `/goal clear`: drop the ordered flag and the focused goal + result.
+    sessionOrdered.delete(sessionID)
+    cleanupGoal(sessionID)
+    lastGoalResults.delete(sessionID)
+    await persist()
+    return "Goal cleared."
+  }
+
+  return { getGoal, getGoalHistory, setGoal, updateGoal, clearGoal }
+}
+
+function agentToolSessionID(ctx) {
+  return ctx?.sessionID || ctx?.session_id || ctx?.session?.id || ctx?.sessionId || null
+}
+
+// Cache the optional @opencode-ai/plugin import once. It provides the `tool`
+// helper and `tool.schema` (zod). It is an optional peer dependency: when it is
+// not installed (e.g. unit tests, older OpenCode), tool registration is simply
+// skipped and the command/event hooks still work.
+let opencodePluginModulePromise
+async function loadOpencodePluginModule() {
+  if (opencodePluginModulePromise === undefined) {
+    opencodePluginModulePromise = import("@opencode-ai/plugin")
+      .then((mod) => mod)
+      .catch(() => null)
+  }
+  return opencodePluginModulePromise
+}
+
+function buildAgentTools(toolHelper, handlers) {
+  const schema = toolHelper.schema
+  const run = (handler) => async (args, ctx) => {
+    const sessionID = agentToolSessionID(ctx)
+    if (!sessionID) return "No session id available for the goal tool."
+    return handler(sessionID, args || {})
+  }
+  return {
+    get_goal: toolHelper({
+      description:
+        "Get the status of the current goal for this session (objective, budget usage, last checkpoint).",
+      args: {},
+      execute: run((sessionID) => handlers.getGoal(sessionID)),
+    }),
+    get_goal_history: toolHelper({
+      description: "Get the lifecycle history and latest checkpoint of the current goal for this session.",
+      args: {},
+      execute: run((sessionID) => handlers.getGoalHistory(sessionID)),
+    }),
+    set_goal: toolHelper({
+      description:
+        "Set a new session goal for autonomous auto-continue. ONLY call this when the user explicitly asks you to set, define, or start working toward a goal — never decide to set a goal on your own. Replaces any existing goal.",
+      args: {
+        objective: schema.string(),
+        maxTurns: schema.number().optional(),
+        maxTokens: schema.number().optional(),
+        maxDurationMs: schema.number().optional(),
+        successCriteria: schema.string().optional(),
+        constraints: schema.string().optional(),
+        mode: schema.string().optional(),
+      },
+      execute: run((sessionID, args) => handlers.setGoal(sessionID, args)),
+    }),
+    update_goal: toolHelper({
+      description:
+        "Update the current goal: revise its `objective`, and/or set its `status` to complete, blocked, paused, or resumed. Mark complete only after verifying the objective is truly done; include `evidence` (for complete) or `blocker` (for blocked).",
+      args: {
+        objective: schema.string().optional(),
+        status: schema.string().optional(),
+        evidence: schema.string().optional(),
+        blocker: schema.string().optional(),
+      },
+      execute: run((sessionID, args) => handlers.updateGoal(sessionID, args)),
+    }),
+    clear_goal: toolHelper({
+      description: "Clear the current goal for this session and discard its saved status.",
+      args: {},
+      execute: run((sessionID) => handlers.clearGoal(sessionID)),
+    }),
+  }
+}
+
 function formatGoalList(sessionID) {
   const goals = listSessionGoals(sessionID)
   const focusedId = goalStates.get(sessionID)?.goalId || null
@@ -1787,6 +2021,8 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
     await persist()
   }
 
+  const agentToolHandlers = buildAgentToolHandlers({ defaultGoalOptions, persist })
+
   const hooks = {
     "command.execute.before": async (input, output) => {
       if (input.command !== commandName) return
@@ -1872,7 +2108,16 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
           return
         }
 
+        const previousGoalId = goal.goalId
         resetGoalBudget(goal)
+        // resetGoalBudget rotates goalId; re-key the multi-goal registry to the
+        // new id so a later clear/replace removes the goal instead of leaking a
+        // stale entry (the focused pointer holds the same object reference).
+        if (goal.goalId !== previousGoalId) {
+          removeSessionGoal(sessionID, previousGoalId)
+          registerSessionGoal(goal)
+          focusGoal(sessionID, goal)
+        }
         goal.stopped = false
         goal.stopReason = ""
         goal.blockedReason = ""
@@ -2583,6 +2828,22 @@ export const GoalPlugin = async ({ client }, pluginOptions = {}) => {
     delete hooks["command.execute.before"]
   }
 
+  // Register agent-facing tools (megalist 7.1 / 7.2) when @opencode-ai/plugin is
+  // available (it provides the `tool` helper and zod-style schema). Disabled via
+  // `registerTools: false`. When the helper is absent the command/event hooks
+  // still work; only the programmatic tool surface is omitted, preserving the
+  // zero-runtime-dependency posture.
+  if (pluginOptions.registerTools !== false) {
+    const toolModule = await loadOpencodePluginModule()
+    if (toolModule?.tool?.schema) {
+      try {
+        hooks.tool = buildAgentTools(toolModule.tool, agentToolHandlers)
+      } catch (error) {
+        await logPluginError(client, "Failed to register goal agent tools", error)
+      }
+    }
+  }
+
   return hooks
 }
 
@@ -2593,6 +2854,9 @@ export default {
 
 export const testInternals = {
   activeGoal,
+  agentToolSessionID,
+  buildAgentToolHandlers,
+  buildAgentTools,
   listSessionGoals,
   formatGoalList,
   appendLedgerLine,

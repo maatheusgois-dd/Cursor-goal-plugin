@@ -6,6 +6,9 @@ import test from "node:test"
 import pluginModule, { GoalPlugin, testInternals } from "../src/goal-plugin.js"
 
 const {
+  agentToolSessionID,
+  buildAgentToolHandlers,
+  buildAgentTools,
   appendLedgerLine,
   buildAuditPrompt,
   parseAuditVerdict,
@@ -3142,4 +3145,143 @@ test("ordered (sisyphus) flag survives a persistence round-trip", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+// ── Agent-facing tools (megalist items 7.1 / 7.2) ──────────────────────────
+
+function makeAgentHandlers() {
+  const persistCalls = []
+  const handlers = buildAgentToolHandlers({
+    defaultGoalOptions: normalizeOptions(),
+    persist: async () => {
+      persistCalls.push(1)
+    },
+  })
+  return { handlers, persistCalls }
+}
+
+test("agentToolSessionID reads common context shapes", () => {
+  assert.equal(agentToolSessionID({ sessionID: "a" }), "a")
+  assert.equal(agentToolSessionID({ session_id: "b" }), "b")
+  assert.equal(agentToolSessionID({ session: { id: "c" } }), "c")
+  assert.equal(agentToolSessionID({}), null)
+  assert.equal(agentToolSessionID(null), null)
+})
+
+test("agent tool handlers set, read, update, and clear a goal", async () => {
+  const { handlers, persistCalls } = makeAgentHandlers()
+  const sid = "agent-s1"
+
+  assert.match(await handlers.getGoal(sid), /No active goal/)
+  assert.match(await handlers.setGoal(sid, { objective: "ship it" }), /New active goal: ship it/)
+  assert.equal(currentGoal(sid).condition, "ship it")
+  // A tool-created goal must land in the multi-goal registry so it persists and
+  // is visible to /goal list, not just goalStates.
+  assert.equal(listSessionGoals(sid).length, 1)
+  assert.match(await handlers.getGoal(sid), /Active goal: ship it/)
+  assert.match(await handlers.getGoalHistory(sid), /Goal history for: ship it/)
+
+  assert.match(await handlers.updateGoal(sid, { objective: "ship it well" }), /Objective updated/)
+  assert.equal(currentGoal(sid).condition, "ship it well")
+
+  assert.match(await handlers.updateGoal(sid, { status: "paused" }), /paused/i)
+  assert.equal(currentGoal(sid).stopped, true)
+  assert.match(await handlers.updateGoal(sid, { status: "resumed" }), /resumed/i)
+  assert.equal(currentGoal(sid).stopped, false)
+
+  assert.match(await handlers.clearGoal(sid), /Goal cleared/)
+  assert.equal(currentGoal(sid), null)
+  assert.equal(listSessionGoals(sid).length, 0)
+  assert.ok(persistCalls.length > 0)
+})
+
+test("agent set_goal honors limit overrides, schema fields, and rejects an empty objective", async () => {
+  const { handlers } = makeAgentHandlers()
+  assert.match(
+    await handlers.setGoal("agent-s2", {
+      objective: "x",
+      maxTurns: 3,
+      maxTokens: 1234,
+      successCriteria: "all tests green",
+      mode: "ordered",
+    }),
+    /New active goal/,
+  )
+  const goal = currentGoal("agent-s2")
+  assert.equal(goal.options.maxTurns, 3)
+  assert.equal(goal.options.maxTokens, 1234)
+  assert.equal(goal.successCriteria, "all tests green")
+  assert.equal(goal.mode, "ordered")
+
+  assert.match(await handlers.setGoal("agent-s3", { objective: "   " }), /No objective provided/)
+  assert.equal(currentGoal("agent-s3"), null)
+})
+
+test("agent update_goal status complete archives the goal with evidence", async () => {
+  const { handlers } = makeAgentHandlers()
+  const sid = "agent-s4"
+  await handlers.setGoal(sid, { objective: "ship it" })
+  assert.match(
+    await handlers.updateGoal(sid, { status: "complete", evidence: "tests pass" }),
+    /complete and archived/,
+  )
+  assert.equal(currentGoal(sid), null)
+  assert.equal(listSessionGoals(sid).length, 0)
+  assert.match(await handlers.getGoal(sid), /State: achieved/)
+  // Evidence text is captured in the lifecycle history.
+  assert.match(await handlers.getGoalHistory(sid), /tests pass/)
+})
+
+test("agent update_goal validates input and requires an active goal", async () => {
+  const { handlers } = makeAgentHandlers()
+  assert.match(await handlers.updateGoal("agent-none", { status: "complete" }), /No active goal to update/)
+
+  await handlers.setGoal("agent-s5", { objective: "x" })
+  assert.match(await handlers.updateGoal("agent-s5", {}), /Nothing to update/)
+  assert.match(await handlers.updateGoal("agent-s5", { status: "frobnicate" }), /Invalid status/)
+})
+
+test("buildAgentTools wraps handlers into OpenCode tool defs and routes by session", async () => {
+  const schema = {
+    string: () => ({ optional: () => "str?" }),
+    number: () => ({ optional: () => "num?" }),
+  }
+  const toolHelper = (def) => def
+  toolHelper.schema = schema
+
+  const { handlers } = makeAgentHandlers()
+  const tools = buildAgentTools(toolHelper, handlers)
+
+  assert.deepEqual(Object.keys(tools).sort(), [
+    "clear_goal",
+    "get_goal",
+    "get_goal_history",
+    "set_goal",
+    "update_goal",
+  ])
+  // The set_goal description constrains autonomous use (item 7.2).
+  assert.match(tools.set_goal.description, /ONLY call this when the user explicitly asks/)
+
+  const sid = "agent-tool-s1"
+  assert.match(await tools.set_goal.execute({ objective: "ship it" }, { sessionID: sid }), /New active goal: ship it/)
+  assert.match(await tools.get_goal.execute({}, { sessionID: sid }), /Active goal: ship it/)
+  // No session id in context → friendly message rather than a throw.
+  assert.match(await tools.get_goal.execute({}, {}), /No session id/)
+})
+
+test("/goal resume does not leak a stale registry entry on later clear", async () => {
+  const { hooks } = await createHooks()
+  const run = (args) =>
+    hooks["command.execute.before"]({ command: "goal", sessionID: "resume-leak", arguments: args }, { parts: [] })
+
+  await run("ship it")
+  assert.equal(listSessionGoals("resume-leak").length, 1)
+  await run("pause")
+  // resume rotates the goalId via resetGoalBudget; the registry must be re-keyed.
+  await run("resume")
+  assert.equal(listSessionGoals("resume-leak").length, 1)
+  await run("clear")
+  // Before the re-key fix this left a stale goal behind (length 1).
+  assert.equal(listSessionGoals("resume-leak").length, 0)
+  assert.equal(currentGoal("resume-leak"), null)
 })

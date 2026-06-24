@@ -1,6 +1,6 @@
 # opencode-goal-plugin
 
-An experimental session-scoped `/goal` command for [OpenCode](https://opencode.ai/).
+An experimental session-scoped `/goal` command for [OpenCode](https://opencode.ai/) — with a [Cursor port](#cursor) included.
 
 Set a goal and the plugin keeps it in context, auto-continues the session whenever the assistant goes idle, and stops when the goal is marked complete, a blocker is reported, or a safety limit is reached.
 
@@ -333,6 +333,47 @@ npm run smoke           # verify package export + command hook without a model c
 npm run check           # syntax check + tests
 npm run pack:check      # verify package contents before publishing
 ```
+
+## Cursor
+
+A full port of the `/goal` workflow for [Cursor](https://cursor.com) is included in `cursor/`. It reimplements the per-event state machine on [Cursor Hooks](https://cursor.com/docs/agent/hooks) (beta) while reusing the OpenCode plugin's prompt/parse/format/completion logic verbatim.
+
+### Install
+
+Copy `.cursor/hooks.json`, `.cursor/commands/goal.md`, and the `cursor/` directory into your project (hooks reference `./cursor/hooks/*.mjs` relative to the workspace root). Requires Node 18+ on `PATH`. Reload Cursor to pick up `hooks.json`.
+
+The state path can be overridden with `CURSOR_GOAL_STATE_PATH`.
+
+### Usage
+
+All commands are identical to the OpenCode plugin:
+
+```
+/goal fix the failing tests and verify the suite passes
+/goal ship the release --max-turns 20 --max-minutes 30 --max-tokens 400000
+/goal status      /goal history     /goal list
+/goal add <objective>     /goal focus <number>
+/goal sisyphus <obj 1>; <obj 2>; <obj 3>
+/goal edit <new objective>
+/goal pause       /goal resume      /goal clear
+```
+
+State is persisted to `.cursor/goals/state.json` (+ `.ledger.jsonl`). The goal is injected into the agent via an always-apply rule at `.cursor/rules/active-goal.mdc`.
+
+### Differences from OpenCode
+
+- **Setting a goal starts a turn.** `beforeSubmitPrompt` cannot rewrite the prompt, so `/goal <objective>` is allowed through to the agent. Read-only and admin subcommands (`status`, `history`, `pause`, `clear`, etc.) block submission and return output directly.
+- **Token budgeting is estimated** from response length (~4 chars/token) and corrected with the real context size at `preCompact`.
+- **No-tool-call detection** is omitted — `afterAgentResponse` only provides text, not tool call metadata.
+- **The completion auditor** (child-session verification) is not ported; Cursor hooks have no session-spawning API. The `[goal:evidence]` gate still applies.
+
+### Test
+
+```sh
+npm run smoke:cursor
+```
+
+See `cursor/README.md` for the full hook-mapping table and implementation notes.
 
 ## License
 

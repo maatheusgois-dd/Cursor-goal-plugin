@@ -1,6 +1,6 @@
 # /goal for Cursor
 
-A port of the OpenCode `/goal` workflow to [Cursor](https://cursor.com) using
+A session-scoped `/goal` workflow for [Cursor](https://cursor.com) using
 [Cursor Hooks](https://cursor.com/docs/agent/hooks). Set a goal and the agent
 keeps working — auto-continuing whenever it stops — until the goal is marked
 complete (with evidence), a concrete blocker is reported, or a safety limit
@@ -8,24 +8,19 @@ complete (with evidence), a concrete blocker is reported, or a safety limit
 
 > Cursor Hooks are a beta feature. Re-test against your exact Cursor build.
 
-## How it maps to Cursor
+## Architecture
 
-OpenCode runs the plugin as one long-lived process with in-memory state and a
-`session.idle` auto-continue. Cursor has no plugin runtime — it runs short-lived
-hook scripts per lifecycle event — so the same behavior is rebuilt on hooks. All
-prompt/parse/format/completion logic is **reused verbatim** from the OpenCode
-plugin (`src/goal-plugin.js` via its `testInternals` export); only the
-persistence and per-event state machine are reimplemented in `cursor/goal-core.mjs`.
+Cursor has no plugin runtime — it runs short-lived hook scripts per lifecycle
+event. All prompt/parse/format/completion logic lives in `cursor/shared.mjs`;
+the per-event state machine and persistence are in `cursor/goal-core.mjs`.
 
-| OpenCode plugin | Cursor port |
+| Hook | Role |
 |---|---|
-| `command.execute.before` (`/goal …`) | `beforeSubmitPrompt` parses `/goal …` directives |
-| `session.idle` auto-continue (`promptAsync`) | `stop` hook returns `followup_message` |
-| message/idle completion + token tracking | `afterAgentResponse` (text) + `preCompact` (real tokens) |
-| `experimental.chat.system.transform` | always-apply rule `.cursor/rules/active-goal.mdc` |
-| `experimental.session.compacting` | `preCompact` + `sessionStart` `additional_context` |
-| "latest instruction wins" | `beforeSubmitPrompt` pauses on a non-continuation user message |
-| state in `~/.opencode/.../state.json` | `.cursor/goals/state.json` (+ `.ledger.jsonl`) |
+| `beforeSubmitPrompt` | Parse `/goal …` directives; pause on real user messages |
+| `stop` | Return `followup_message` to auto-continue |
+| `afterAgentResponse` | Check completion/blocked markers; update checkpoints |
+| `preCompact` | Inject goal summary; record real token count |
+| `sessionStart` | Inject goal summary as `additional_context` after restart |
 
 ## Install
 
@@ -60,20 +55,19 @@ and must put a `[goal:evidence] …` line immediately before it — a
 input is required, it states the concrete blocker on the line immediately before
 `[goal:blocked]`.
 
-## Behavior differences from OpenCode
+## Behavior notes
 
 - **Setting a goal starts a turn.** `beforeSubmitPrompt` cannot rewrite the
-  prompt, so `/goal <objective>` is allowed through to the agent (the goal rule
-  reframes it). Read-only subcommands (`status`, `history`, `list`) and admin
-  ones (`pause`, `clear`) block submission and return their output directly.
+  prompt, so `/goal <objective>` is allowed through to the agent. Read-only and
+  admin subcommands (`status`, `history`, `pause`, `clear`, etc.) block
+  submission and return their output directly.
 - **Token budgeting is estimated** per turn from response length (~4 chars/token)
-  and corrected with the real context size at `preCompact`. Turn and time limits
-  are exact.
-- **No-tool-call detection** is omitted — Cursor hook payloads don't expose a
-  turn's tool calls (`afterAgentResponse` provides only text). The low-output
-  no-progress guard covers most stall cases.
-- **The completion auditor** (child-session verification) is not ported; Cursor
-  hooks have no session-spawning API. The evidence gate still applies.
+  and corrected with the real context size at `preCompact`.
+- **No-tool-call detection** is omitted — `afterAgentResponse` provides only
+  text, not tool call metadata. The low-output no-progress guard covers most
+  stall cases.
+- **The completion auditor** (child-session verification) is not implemented;
+  Cursor hooks have no session-spawning API. The `[goal:evidence]` gate applies.
 
 ## Test
 

@@ -17,9 +17,7 @@ import { randomUUID } from "node:crypto"
 import { promises as fs } from "node:fs"
 import { dirname, join } from "node:path"
 
-import goalPlugin, { testInternals } from "../src/goal-plugin.js"
-
-void goalPlugin
+import { testInternals } from "./shared.mjs"
 
 const {
   parseGoalArguments,

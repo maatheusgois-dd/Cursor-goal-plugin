@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "node ./cursor/hooks/session-start.mjs" }
+    ],
+    "beforeSubmitPrompt": [
+      { "command": "node ./cursor/hooks/before-submit-prompt.mjs" }
+    ],
+    "afterAgentResponse": [
+      { "command": "node ./cursor/hooks/after-agent-response.mjs" }
+    ],
+    "stop": [
+      { "command": "node ./cursor/hooks/stop.mjs", "loop_limit": null }
+    ],
+    "preCompact": [
+      { "command": "node ./cursor/hooks/pre-compact.mjs" }
+    ]
+  }
+}
